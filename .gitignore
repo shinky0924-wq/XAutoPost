@@ -10,6 +10,7 @@ __pycache__/
 *.pyc
 browser_sessions/
 image_cooldown_history.json
+image_history.json
 suspended_accounts.txt
 *.exe
 public/assets/aistudio/

@@ -2,6 +2,7 @@ import JSZip from 'jszip';
 import { AccountConfig, BotOperationSettings, DmTargetItem } from '../types';
 import { accountMultiTabToBinary, accountsInfoToExcelBinary, dmTargetsToExcelBinary } from './excelHelper';
 import autoTweetPlaywrightRaw from '../../auto_tweet_playwright.py?raw';
+import chromeLauncherRaw from '../../chrome_launcher.py?raw';
 import updatePs1Raw from '../../update.ps1?raw';
 import addDailyTweetsExcelRaw from '../../add_daily_tweets_excel.py?raw';
 import { 
@@ -36,10 +37,17 @@ export async function generatePythonProjectZip(
   zip.file('TEST_ONE_TWEET.bat', BATCH_TEST_ONE_TWEET_TEMPLATE);
   zip.file('SETUP.bat', BATCH_SETUP_TEMPLATE);
   zip.file('BUILD_EXE.bat', BATCH_BUILD_EXE_TEMPLATE);
-  zip.file('update.ps1', updatePs1Raw);
+  const ps1Normalized = updatePs1Raw.replace(/\r?\n/g, '\r\n');
+  const ps1WithBom = ps1Normalized.startsWith('\uFEFF') ? ps1Normalized : '\uFEFF' + ps1Normalized;
+  zip.file('update.ps1', ps1WithBom);
+  zip.file(
+    'UPDATE.bat',
+    '@echo off\r\nchcp 65001 >nul\r\ntitle X_AutoTweetBot Update\r\ncd /d "%~dp0"\r\npowershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update.ps1"\r\nif %errorlevel% neq 0 (\r\n    echo.\r\n    echo [ERROR] Update failed with code %errorlevel%.\r\n    pause\r\n)\r\n'
+  );
 
   // 1. ブラウザ自動操縦スクリプト（完全統合・最新版: 案3画像クールダウン＆アカウント間重複ロック対応）
   zip.file('auto_tweet_playwright.py', autoTweetPlaywrightRaw);
+  zip.file('chrome_launcher.py', chromeLauncherRaw);
   zip.file('add_daily_tweets_excel.py', addDailyTweetsExcelRaw);
 
   // 1.5. 自動DM＆フォロー用Playwrightスクリプト（提案1＆提案2対応）

@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { AccountConfig, BotOperationSettings, DmTargetItem } from '../types';
 import autoTweetPlaywrightRaw from '../../auto_tweet_playwright.py?raw';
+import chromeLauncherRaw from '../../chrome_launcher.py?raw';
 import updatePs1Raw from '../../update.ps1?raw';
 import addDailyTweetsExcelRaw from '../../add_daily_tweets_excel.py?raw';
 import { 
@@ -53,7 +54,7 @@ export const PythonExporter: React.FC<PythonExporterProps> = ({
   dmTargets = DEFAULT_DM_TARGETS
 }) => {
   const [activeFile, setActiveFile] = useState<
-    'rotationbat' | 'updateps1' | 'playwright' | 'dmbat' | 'bat' | 'testbat' | 'dmplaywright' | 'settingsjson' | 'json' | 'readme' | 'req'
+    'rotationbat' | 'chromelauncher' | 'updateps1' | 'playwright' | 'dmbat' | 'bat' | 'testbat' | 'dmplaywright' | 'settingsjson' | 'json' | 'readme' | 'req'
   >('rotationbat');
   const [copied, setCopied] = useState(false);
   const [isZipping, setIsZipping] = useState(false);
@@ -89,6 +90,8 @@ export const PythonExporter: React.FC<PythonExporterProps> = ({
     switch (activeFile) {
       case 'rotationbat':
         return BATCH_START_ROTATION_TEMPLATE;
+      case 'chromelauncher':
+        return chromeLauncherRaw;
       case 'updateps1':
         return updatePs1Raw;
       case 'dmbat':
@@ -210,6 +213,17 @@ export const PythonExporter: React.FC<PythonExporterProps> = ({
             >
               <RefreshCw className="w-3.5 h-3.5 text-sky-400" />
               START_ROTATION.bat (提案1ローテーション)
+            </button>
+            <button
+              onClick={() => setActiveFile('chromelauncher')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono transition cursor-pointer ${
+                activeFile === 'chromelauncher'
+                  ? 'bg-neutral-800 text-amber-400 border border-neutral-700 shadow-sm font-semibold'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+            >
+              <Globe className="w-3.5 h-3.5 text-amber-400" />
+              chrome_launcher.py (初回手動ログイン)
             </button>
             <button
               onClick={() => setActiveFile('updateps1')}

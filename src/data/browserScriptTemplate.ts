@@ -993,18 +993,24 @@ export const BATCH_BUILD_EXE_TEMPLATE = `@echo off
 title Build EXE (PyInstaller)
 color 0e
 echo ======================================================
-echo   X_AutoTweetBot.exe Builder (Lightweight openpyxl)
+echo   X_AutoTweetBot.exe & chrome_launcher.exe Builder
 echo ======================================================
 echo.
 echo Installing PyInstaller and required packages...
 pip install pyinstaller playwright openpyxl pillow
 echo.
-echo Building standalone executable (.exe)...
-pyinstaller --noconfirm --onedir --console --name "X_AutoTweetBot" --exclude-module pandas "auto_tweet_playwright.py"
+echo [1/2] Building X_AutoTweetBot.exe...
+pyinstaller --noconfirm --onedir --console --name "X_AutoTweetBot" --collect-all playwright --collect-all openpyxl "auto_tweet_playwright.py"
+echo.
+echo [2/2] Building chrome_launcher.exe...
+if exist chrome_launcher.py (
+    pyinstaller --noconfirm --onefile --console --name "chrome_launcher" "chrome_launcher.py"
+)
 echo.
 echo ======================================================
 echo   Build complete!
-echo   Check dist/X_AutoTweetBot/ folder for X_AutoTweetBot.exe
+echo   - dist/X_AutoTweetBot/X_AutoTweetBot.exe
+echo   - dist/chrome_launcher.exe
 echo ======================================================
 echo.
 pause
