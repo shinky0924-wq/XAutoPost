@@ -20,4 +20,6 @@ screenshots/
 bot_running.pid
 stop_bot.flag
 bot_active_profile.txt
-
+bot_status.json
+session_status.json
+paused_accounts.json

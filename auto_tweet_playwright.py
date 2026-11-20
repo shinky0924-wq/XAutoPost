@@ -625,11 +625,31 @@ def find_excel_for_account(user_id):
     return None
 
 
-def load_accounts():
-    accounts_file = "アカウント情報.xlsx"
+PAUSED_ACCOUNTS_FILE = "paused_accounts.json"
+
+
+def load_paused_accounts() -> set[str]:
+    p = os.path.join(get_app_dir(), PAUSED_ACCOUNTS_FILE)
+    if not os.path.exists(p):
+        return set()
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return {str(x).replace("@", "").strip().lower() for x in data if str(x).strip()}
+    except Exception:
+        pass
+    return set()
+
+
+def load_accounts(include_paused: bool = False):
+    accounts_file = os.path.join(get_app_dir(), "アカウント情報.xlsx")
+    if not os.path.exists(accounts_file):
+        accounts_file = "アカウント情報.xlsx"
     accounts = []
     if not os.path.exists(accounts_file):
         return accounts
+    paused_set = set() if include_paused else load_paused_accounts()
     try:
         wb = openpyxl.load_workbook(accounts_file, data_only=True)
         ws = wb["アカウント情報"] if "アカウント情報" in wb.sheetnames else wb.active
@@ -643,6 +663,8 @@ def load_accounts():
             clean_id = user_id.replace("@", "").lower()
 
             if clean_id in BLACKLISTED_ACCOUNTS:
+                continue
+            if not include_paused and clean_id in paused_set:
                 continue
 
             handle = user_id if user_id.startswith("@") else "@" + user_id
@@ -1347,6 +1369,28 @@ def set_active_bot_profile(profile_name: str | None) -> None:
         pass
 
 
+def get_status_file() -> str:
+    return os.path.join(get_app_dir(), "bot_status.json")
+
+
+def write_bot_status(current_account: str = "", current_theme: str = "", next_post_times: dict | None = None) -> None:
+    try:
+        serialized_next = {}
+        if next_post_times:
+            for (cid, sname), dt_val in next_post_times.items():
+                serialized_next[f"{cid}|{sname}"] = dt_val.strftime("%Y-%m-%d %H:%M:%S")
+        payload = {
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "current_account": current_account,
+            "current_theme": current_theme,
+            "next_post_times": serialized_next,
+        }
+        with open(get_status_file(), "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 def is_stop_requested() -> bool:
     return os.path.exists(get_stop_flag_file())
 
@@ -1388,9 +1432,12 @@ def safe_run():
     try:
         with sync_playwright() as p:
             while not is_stop_requested():
+                BLACKLISTED_ACCOUNTS.clear()
+                load_blacklist()
                 accounts = load_accounts()
                 if not accounts:
-                    logger.warning("運用可能な健全アカウントが見つかりません。30秒後に再確認します。")
+                    write_bot_status("", "", next_post_times)
+                    logger.warning("運用可能な健全アカウントが見つかりません（全アカウント停止中または未登録）。30秒後に再確認します。")
                     if interruptible_sleep(30):
                         break
                     continue
@@ -1472,6 +1519,7 @@ def safe_run():
 
                             context, page, is_suspended, suspension_reason = None, None, False, ""
                             set_active_bot_profile(clean_id)
+                            write_bot_status(clean_id, sheet_name, next_post_times)
                             try:
                                 context = launch_browser_safely(p, session_dir)
                                 page = context.pages[0] if len(context.pages) > 0 else context.new_page()
@@ -1529,6 +1577,7 @@ def safe_run():
                                 blacklist_and_remove_account(handle, reason=suspension_reason)
                                 for k in [key for key in next_post_times if key[0] == clean_id]:
                                     del next_post_times[k]
+                                write_bot_status("", "", next_post_times)
                                 logger.info("⚡ 再起動せず即時排除しました。残りのアカウントで継続します。")
                                 if interruptible_sleep(2):
                                     break
@@ -1539,6 +1588,7 @@ def safe_run():
                             t_max = max(st["min_interval"], st["max_interval"])
                             wait_sec = random.randint(t_min, t_max) if t_min < t_max else t_min
                             next_post_times[schedule_key] = datetime.now() + timedelta(seconds=wait_sec)
+                            write_bot_status("", "", next_post_times)
 
                             logger.info(
                                 f"⏳ [{handle} / {sheet_name}] 次回: {next_post_times[schedule_key].strftime('%H:%M:%S')} "
@@ -1557,12 +1607,14 @@ def safe_run():
                 if is_stop_requested():
                     break
                 if not worked_in_this_cycle:
+                    write_bot_status("", "", next_post_times)
                     if interruptible_sleep(15):
                         break
 
         if is_stop_requested():
             logger.info("🛑 停止指示を検知したため、ボットを安全に停止しました。")
     finally:
+        write_bot_status("", "", next_post_times)
         for fp in (pid_path, stop_flag_path, get_active_profile_file()):
             try:
                 if os.path.exists(fp):
@@ -1571,17 +1623,235 @@ def safe_run():
                 pass
 
 
-def main():
+def run_single_test(target_account: str, target_theme: str = ""):
+    """GUIからの指定アカウント1件テスト投稿モード"""
+    clean_target = sanitize_filename_part(target_account).lower()
+    logger.info("==================================================")
+    logger.info(f"⚡ 1件テスト投稿モード起動: 対象={clean_target}" + (f" / テーマ={target_theme}" if target_theme else ""))
+    logger.info("==================================================")
+
+    accounts = load_accounts(include_paused=True)
+    acc = next((a for a in accounts if a["clean_id"].lower() == clean_target), None)
+    if not acc:
+        logger.error(f"❌ 対象アカウント「{clean_target}」が アカウント情報.xlsx に見つかりません（ブラックリスト除外済みの可能性あり）。")
+        return
+
+    excel_path = acc.get("excel_path")
+    if not excel_path:
+        logger.error(f"❌ [{acc['handle']}] に対応する Excel ファイルが見つかりません。")
+        return
+
+    pid_path = get_pid_file()
+    stop_flag_path = get_stop_flag_file()
     try:
-        safe_run()
+        if os.path.exists(stop_flag_path):
+            os.remove(stop_flag_path)
+        with open(pid_path, "w", encoding="utf-8") as pf:
+            pf.write(str(os.getpid()))
+    except Exception:
+        pass
+
+    fix_playwright_windows_driver()
+    switch_account_log(acc["clean_id"])
+    try:
+        now = datetime.now()
+        themes = load_theme_sheets(excel_path, handle=acc["handle"], now_dt=now)
+        if target_theme:
+            themes = [t for t in themes if t["sheet_name"] == target_theme]
+
+        chosen_theme = None
+        chosen_tweet = None
+        for t in themes:
+            if t["eligible_tweets"]:
+                chosen_theme = t
+                chosen_tweet = random.choice(t["eligible_tweets"]) if t["settings"]["mode"] == 1 else t["eligible_tweets"][0]
+                break
+
+        if not chosen_theme or not chosen_tweet:
+            logger.warning(f"⚠️ [{acc['handle']}] テスト投稿可能な未投稿ポストがありません（投稿時間外または全件投稿済み）。")
+            return
+
+        target_text = replace_dynamic_tags(expand_spintax(chosen_tweet["raw_text"]))
+        target_img = resolve_image_path(chosen_tweet["raw_img"], handle=acc["handle"])
+        session_dir = resolve_session_dir(acc["handle"])
+
+        logger.info(f"🧪 テスト対象: テーマ「{chosen_theme['sheet_name']}」行{chosen_tweet['row']} / {target_text[:40]}...")
+        set_active_bot_profile(acc["clean_id"])
+        with sync_playwright() as p:
+            context, page = None, None
+            try:
+                context = launch_browser_safely(p, session_dir)
+                page = context.pages[0] if len(context.pages) > 0 else context.new_page()
+                apply_media_blocking(page)
+                if acc.get("auth_token"):
+                    context.add_cookies([{"name": "auth_token", "value": acc["auth_token"], "domain": ".x.com", "path": "/"}])
+
+                page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=30000)
+                if interruptible_sleep(random.uniform(2.0, 3.0)):
+                    return
+
+                susp = check_suspension_or_lock(page)
+                if susp:
+                    save_account_screenshot(page, acc["clean_id"], "suspended")
+                    logger.critical(f"🚨 凍結・ロック検知: {susp}")
+                    blacklist_and_remove_account(acc["handle"], reason=susp)
+                else:
+                    res = post_tweet_with_smart_retry(page, target_text, target_img, account_name=acc["clean_id"])
+                    if res == "success":
+                        if target_img:
+                            record_image_usage(target_img, acc["handle"])
+                        update_excel_status(
+                            excel_path, chosen_theme["sheet_name"],
+                            chosen_tweet["row"], chosen_tweet["status_col"], chosen_tweet["date_col"],
+                            "posted"
+                        )
+                        logger.info("✅ 1件テスト投稿が完了しました！")
+                    elif res == "aborted":
+                        logger.info("🛑 テスト投稿を中断しました。")
+                    elif res.startswith("suspended:"):
+                        blacklist_and_remove_account(acc["handle"], reason=res.replace("suspended:", ""))
+                    else:
+                        logger.warning(f"⚠️ テスト結果: {res}")
+            finally:
+                if context:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                set_active_bot_profile(None)
+    finally:
+        switch_account_log(None)
+        for fp in (pid_path, stop_flag_path, get_active_profile_file()):
+            try:
+                if os.path.exists(fp):
+                    os.remove(fp)
+            except Exception:
+                pass
+
+
+def run_session_check():
+    """全プロファイルの X ログイン状態を軽量ヘッドレスチェックし session_status.json へ保存"""
+    logger.info("==================================================")
+    logger.info("🔍 全プロファイル X ログイン状態一括チェック開始")
+    logger.info("==================================================")
+
+    sessions_root = os.path.join(get_app_dir(), "browser_sessions")
+    os.makedirs(sessions_root, exist_ok=True)
+    accounts = load_accounts(include_paused=True)
+
+    targets = []
+    seen = set()
+    for a in accounts:
+        cid = a["clean_id"]
+        if cid not in seen:
+            seen.add(cid)
+            targets.append((cid, a.get("auth_token", "")))
+    for entry in sorted(os.listdir(sessions_root)):
+        full = os.path.join(sessions_root, entry)
+        if os.path.isdir(full):
+            cid = entry.lstrip("_").lower()
+            if cid not in seen:
+                seen.add(cid)
+                targets.append((cid, ""))
+
+    results = {}
+    status_path = os.path.join(get_app_dir(), "session_status.json")
+    if os.path.exists(status_path):
+        try:
+            with open(status_path, "r", encoding="utf-8") as f:
+                results = json.load(f)
+        except Exception:
+            results = {}
+
+    fix_playwright_windows_driver()
+    with sync_playwright() as p:
+        for cid, tok in targets:
+            if is_stop_requested():
+                break
+            sdir = resolve_session_dir(cid)
+            status_label = "不明"
+            detail = ""
+            context = None
+            try:
+                kwargs = {
+                    "user_data_dir": sdir,
+                    "headless": True,
+                    "viewport": {"width": 1280, "height": 800},
+                    "args": ["--disable-blink-features=AutomationControlled"],
+                }
+                try:
+                    context = p.chromium.launch_persistent_context(**kwargs, channel="chrome")
+                except Exception:
+                    context = p.chromium.launch_persistent_context(**kwargs)
+
+                page = context.pages[0] if len(context.pages) > 0 else context.new_page()
+                apply_media_blocking(page)
+                if tok:
+                    context.add_cookies([{"name": "auth_token", "value": tok, "domain": ".x.com", "path": "/"}])
+
+                page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=25000)
+                time.sleep(2.5)
+                cur_url = (page.url or "").lower()
+                susp = check_suspension_or_lock(page)
+                if susp:
+                    status_label = "凍結/制限"
+                    detail = susp
+                elif "login" in cur_url or "flow/login" in cur_url:
+                    status_label = "要ログイン"
+                    detail = "ログイン画面へリダイレクト"
+                else:
+                    status_label = "ログイン済み"
+                    detail = "OK"
+            except Exception as ce:
+                err_s = str(ce)
+                if "in use" in err_s.lower() or "lock" in err_s.lower() or "singleton" in err_s.lower():
+                    status_label = "使用中(ロック)"
+                else:
+                    status_label = "確認エラー"
+                detail = err_s[:80]
+            finally:
+                if context:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+
+            checked_at = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+            results[cid] = {"status": status_label, "detail": detail, "checked_at": checked_at}
+            logger.info(f"🔎 [{cid}] -> {status_label} ({detail})")
+
+    try:
+        with open(status_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    logger.info("✅ 全プロファイルチェック完了！")
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="X Browser Auto Tweet Bot")
+    parser.add_argument("--test-account", type=str, default="", help="指定アカウントのみ1件テスト投稿")
+    parser.add_argument("--test-theme", type=str, default="", help="テスト投稿時の対象テーマシート名")
+    parser.add_argument("--check-sessions", action="store_true", help="全プロファイルのログイン状態をチェック")
+    args, _unknown = parser.parse_known_args()
+
+    try:
+        if args.check_sessions:
+            run_session_check()
+        elif args.test_account:
+            run_single_test(args.test_account, args.test_theme)
+        else:
+            safe_run()
     except Exception as e:
         logger.critical(f"重大なエラーが発生しました: {e}")
         logger.critical(traceback.format_exc())
-        print("\n" + "=" * 60)
-        print("エラーが発生したため停止しました。")
-        print("キーを押すと画面を閉じます...")
-        print("=" * 60)
-        input()
+        if not args.check_sessions and not args.test_account:
+            print("\n" + "=" * 60)
+            print("エラーが発生したため停止しました。")
+            print("キーを押すと画面を閉じます...")
+            print("=" * 60)
+            input()
     finally:
         close_account_log()
 
