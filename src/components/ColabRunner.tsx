@@ -158,7 +158,7 @@ ${formattedSingleTweets || '    "【テスト投稿】Google Colaboratory から
 ]
 
 def load_latest_tweets_and_settings():
-    """Colab上のExcelファイル（tweets.xlsx または ${currentAccount?.excelFileName || 'account.xlsx'}）から下タブ「設定」「ツイート文章」を自動読込"""
+    """Colab上のExcelファイル（tweets.xlsx または ${currentAccount?.excelFileName || 'account.xlsx'}）からテーマ設定と投稿本文を自動読込"""
     global MIN_INTERVAL, MAX_INTERVAL, SHUFFLE_ON_REPEAT, AUTH_TOKEN
     
     # 0. アカウント情報.xlsx から auth_token を自動取得（未設定の場合）
@@ -179,42 +179,27 @@ def load_latest_tweets_and_settings():
     if excel_path:
         try:
             xl = pd.ExcelFile(excel_path)
-            # 1. 下タブ「設定」があれば間隔やモードを取得
-            settings_sheet = next((s for s in xl.sheet_names if "設定" in s), None)
-            if settings_sheet:
-                sdf = pd.read_excel(excel_path, sheet_name=settings_sheet, header=None)
-                for idx, row in sdf.iterrows():
-                    row_txt = " ".join([str(v) for v in row if pd.notna(v)])
-                    if "ツイート間隔" in row_txt:
-                        for offset in [1, 2]:
-                            if idx + offset < len(sdf):
-                                nums = [int(x) for x in sdf.iloc[idx+offset] if str(x).isdigit()]
-                                if len(nums) >= 2:
-                                    MIN_INTERVAL = nums[0] * 60
-                                    MAX_INTERVAL = max(MIN_INTERVAL, nums[1] * 60)
-                                    print(f"⚙️ [設定シート適用] 間隔: {nums[0]}分〜{nums[1]}分 ({MIN_INTERVAL}秒〜{MAX_INTERVAL}秒)")
-                                    break
-                    if "モード" in row_txt:
-                        for offset in [1, 2]:
-                            if idx + offset < len(sdf):
-                                mode_vals = [int(x) for x in sdf.iloc[idx+offset] if str(x) in ['0', '1']]
-                                if mode_vals:
-                                    SHUFFLE_ON_REPEAT = (mode_vals[0] == 1)
-                                    print(f"⚙️ [設定シート適用] モード: {'1: ランダム' if mode_vals[0] == 1 else '0: 上から順'}")
-                                    break
+            theme_sheet = next((s for s in xl.sheet_names if s not in ["設定", "日常ツイート"]), xl.sheet_names[0])
+            raw_df = pd.read_excel(excel_path, sheet_name=theme_sheet, header=None)
+            # テーマ設定（1〜2行目）が記載されていれば読み取る
+            if len(raw_df) >= 2 and "実行時間" in str(raw_df.iloc[0, 0]):
+                import re
+                iv_nums = [int(n) for n in re.findall(r'\\d+', str(raw_df.iloc[1, 2]))]
+                if len(iv_nums) >= 2:
+                    MIN_INTERVAL = iv_nums[0] * 60
+                    MAX_INTERVAL = max(MIN_INTERVAL, iv_nums[1] * 60)
+                mode_str = str(raw_df.iloc[1, 3])
+                SHUFFLE_ON_REPEAT = not mode_str.strip().startswith("0")
+                df = pd.read_excel(excel_path, sheet_name=theme_sheet, header=3)
+            else:
+                df = pd.read_excel(excel_path, sheet_name=theme_sheet)
 
-            # 2. 下タブ「ツイート文章」から本文リストを取得
-            tweets_sheet = next((s for s in xl.sheet_names if "ツイート" in s or "文章" in s), None)
-            if not tweets_sheet and len(xl.sheet_names) > 0:
-                tweets_sheet = xl.sheet_names[-1] if len(xl.sheet_names) > 1 and "設定" in xl.sheet_names[0] else xl.sheet_names[0]
-
-            df = pd.read_excel(excel_path, sheet_name=tweets_sheet)
-            col = [c for c in df.columns if "ツイート" in str(c) or "text" in str(c).lower() or "本文" in str(c)]
+            col = [c for c in df.columns if "ツイート" in str(c) or "ポスト" in str(c) or "text" in str(c).lower() or "本文" in str(c)]
             if col:
                 tweets = df[col[0]].dropna().astype(str).tolist()
             else:
                 tweets = df.iloc[:, 1 if len(df.columns) > 1 else 0].dropna().astype(str).tolist()
-            print(f"📊 [Excel自動読込] '{excel_path}' (シート: {tweets_sheet}) から {len(tweets)} 件を取得しました！")
+            print(f"📊 [Excel自動読込] '{excel_path}' (テーマ: {theme_sheet}) から {len(tweets)} 件を取得しました！")
         except Exception as e:
             print(f"⚠️ Excel読み込みエラー: {e}")
     return tweets
@@ -651,7 +636,7 @@ await run_multi_accounts_tweet()`;
                 }
               }}
               className="flex items-center gap-2 px-3.5 py-2 bg-emerald-700 hover:bg-emerald-600 text-white font-semibold text-xs rounded-xl transition border border-emerald-600 cursor-pointer shadow-sm"
-              title="下タブ1: 設定 / 下タブ2: ツイート文章 を含んだアカウント専用Excelをダウンロード"
+              title="テーマ別シート・投稿時間列対応のアカウント専用Excelをダウンロード"
             >
               <Download className="w-4 h-4 text-emerald-200" />
               {currentAccount?.excelFileName || `${currentAccount?.name}.xlsx`} をDL
@@ -878,7 +863,7 @@ await run_multi_accounts_tweet()`;
                   }
                 }}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-neutral-950 text-emerald-400 border border-neutral-700 hover:border-emerald-500 transition cursor-pointer"
-                title="このアカウント専用のExcelファイル（設定＋ツイート文章）をダウンロード"
+                title="このアカウント専用のテーマ別Excelファイルをダウンロード"
               >
                 <Download className="w-3.5 h-3.5" />
                 {currentAccount?.excelFileName || 'アカウント.xlsx'} をダウンロード
@@ -1078,7 +1063,7 @@ await run_multi_accounts_tweet()`;
                     <button
                       onClick={() => downloadAccountMultiTabExcel(acc, acc.excelFileName || `${acc.name}.xlsx`)}
                       className="w-full flex items-center justify-center gap-1.5 py-1 px-2 rounded bg-neutral-900 hover:bg-neutral-800 text-emerald-400 border border-neutral-800 hover:border-emerald-500/40 text-[11px] font-medium transition cursor-pointer"
-                      title="下タブ1: 設定 / 下タブ2: ツイート文章 を含んだExcelファイルをダウンロード"
+                      title="テーマ別シート・投稿時間列対応のExcelファイルをダウンロード"
                     >
                       <Download className="w-3 h-3" />
                       {acc.excelFileName || `${acc.name}.xlsx`} をDL

@@ -95,29 +95,29 @@ export const ApiGuide: React.FC = () => {
             </div>
             <p className="text-xs text-neutral-200 leading-relaxed">
               Windowsをお使いの場合、黒い画面にコマンドを入力する必要はありません！<br />
-              ZIPを解凍したら、フォルダ内の <strong className="text-emerald-300 font-mono">「START.bat」</strong> をダブルクリックするだけで、
-              <strong>初回ライブラリ自動インストールからブラウザ起動・自動投稿まですべて自動実行</strong>されます。
+              ZIPを解凍したら、フォルダ内の <strong className="text-emerald-300 font-mono">「X_BOT_GUI.vbs」</strong> をダブルクリックするだけで、
+              <strong>ボットの起動・安全停止・Chromeプロフィール編集・Excel管理</strong>をすべてGUIから操作できます。
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
-              <div className="p-3.5 rounded-xl bg-neutral-950/80 border border-amber-500/40 text-xs space-y-1">
-                <span className="font-bold text-amber-300 block">⚡ TEST_ONE_TWEET.bat</span>
-                <p className="text-neutral-300 text-[11px]">
-                  【実アカウント投稿テスト用】Excelの<strong>最初の1件だけを実際に投稿</strong>して安全に終了します。最初のお試しに最適！
-                </p>
-              </div>
-
               <div className="p-3.5 rounded-xl bg-neutral-950/80 border border-emerald-500/30 text-xs space-y-1">
-                <span className="font-bold text-emerald-400 block">START.bat （本番の連続起動）</span>
+                <span className="font-bold text-emerald-400 block">🖥️ X_BOT_GUI.vbs （メイン操作）</span>
                 <p className="text-neutral-300 text-[11px]">
-                  ダブルクリックで環境チェック＆Excel全件の自動投稿を開始します。終了は画面を閉じるか <kbd className="bg-neutral-800 px-1 rounded font-mono">Ctrl+C</kbd>。
+                  起動・安全停止・Chrome手動起動・テーマExcel一括更新を1画面で操作。実行ログは <code className="text-emerald-300">log/アカウント名.log</code> に保存されます。
                 </p>
               </div>
 
-              <div className="p-3.5 rounded-xl bg-neutral-950/80 border border-neutral-800 text-xs space-y-1">
-                <span className="font-bold text-sky-400 block">BUILD_EXE.bat （exe化）</span>
+              <div className="p-3.5 rounded-xl bg-neutral-950/80 border border-rose-500/40 text-xs space-y-1">
+                <span className="font-bold text-rose-300 block">🛑 STOP_BOT.vbs （安全停止）</span>
                 <p className="text-neutral-300 text-[11px]">
-                  ダブルクリックすると、PythonコードをWindows用実行ファイル「<strong>X_AutoTweetBot.exe</strong>」に自動変換します。
+                  GUIを開かずにボットだけ安全停止したいときに使います。手動で開いたChromeやGUI画面は閉じません。
+                </p>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-neutral-950/80 border border-sky-500/30 text-xs space-y-1">
+                <span className="font-bold text-sky-400 block">🔄 UPDATE.bat （配布更新）</span>
+                <p className="text-neutral-300 text-[11px]">
+                  最新版ZIPを上書きした後に実行すると、不要ファイルを整理しながら <code className="text-sky-300">X_BOT_配布用(Python不要)</code> を最新化します。
                 </p>
               </div>
             </div>

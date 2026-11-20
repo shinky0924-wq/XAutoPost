@@ -921,26 +921,42 @@ pause
 `;
 
 export const BATCH_START_ROTATION_TEMPLATE = `@echo off
-title X 1-Window Rotation Tweet Bot
-color 0b
+cd /d "%~dp0"
+title X_AutoTweetBot
 echo ======================================================
-echo    X Auto Tweet Bot - 1-Window Rotation Mode
-echo    - 1 Account (3-5 tweets) -> Close & Free RAM
-echo    - Switch to Next Account -> Close
-echo    - 1-Cycle Finished -> Cooldown & Repeat
-echo    - Media Blocked (50-70%% RAM reduction)
+echo   X Auto Tweet Bot - Starting...
 echo ======================================================
 echo.
 
-python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERROR] Python is not found.
-    pause
-    exit /b 1
+if not exist "auto_tweet_playwright.py" goto try_exe
+
+set "PY_CMD="
+if exist "C:\\Users\\PC_User\\AppData\\Local\\Programs\\Python\\Python312\\python.exe" set "PY_CMD=C:\\Users\\PC_User\\AppData\\Local\\Programs\\Python\\Python312\\python.exe"
+if not defined PY_CMD if exist "%LOCALAPPDATA%\\Programs\\Python\\Python312\\python.exe" set "PY_CMD=%LOCALAPPDATA%\\Programs\\Python\\Python312\\python.exe"
+if not defined PY_CMD if exist "%LOCALAPPDATA%\\Programs\\Python\\Python311\\python.exe" set "PY_CMD=%LOCALAPPDATA%\\Programs\\Python\\Python311\\python.exe"
+if not defined PY_CMD if exist "%LOCALAPPDATA%\\Programs\\Python\\Python313\\python.exe" set "PY_CMD=%LOCALAPPDATA%\\Programs\\Python\\Python313\\python.exe"
+if not defined PY_CMD if exist "%LOCALAPPDATA%\\Programs\\Python\\Python310\\python.exe" set "PY_CMD=%LOCALAPPDATA%\\Programs\\Python\\Python310\\python.exe"
+
+if defined PY_CMD goto run_py
+
+where python >nul 2>&1
+if %errorlevel% equ 0 (
+    set "PY_CMD=python"
+    goto run_py
 )
 
-python auto_tweet_playwright.py --rotation --block-media
+:try_exe
+if exist "X_AutoTweetBot.exe" (
+    "X_AutoTweetBot.exe"
+    goto end_bot
+)
+echo [ERROR] Python or X_AutoTweetBot.exe not found.
+goto end_bot
 
+:run_py
+"%PY_CMD%" "auto_tweet_playwright.py"
+
+:end_bot
 echo.
 pause
 `;

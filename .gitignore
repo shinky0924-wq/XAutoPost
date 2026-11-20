@@ -13,4 +13,11 @@ image_cooldown_history.json
 image_history.json
 suspended_accounts.txt
 *.exe
+*.spec
 public/assets/aistudio/
+log/
+screenshots/
+bot_running.pid
+stop_bot.flag
+bot_active_profile.txt
+

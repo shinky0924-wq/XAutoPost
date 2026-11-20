@@ -111,16 +111,43 @@ export default function App() {
       accessToken: '',
       accessSecret: '',
       excelFileName: `tweets_account_${newIdx}.xlsx`,
-      minIntervalSec: 60,
-      maxIntervalSec: 180,
-      repeatMode: false,
+      minIntervalSec: 7200,
+      maxIntervalSec: 21600,
+      intervalMinMinutes: 120,
+      intervalMaxMinutes: 360,
+      activeTimeStart: '0:00',
+      activeTimeEnd: '0:00',
+      tweetOrderMode: 1,
+      repeatMode: true,
       isActive: true,
       tweets: [
         {
           id: 1,
           text: `アカウント #${newIdx} からの最初の自動ツイートです！`,
+          post_time: '',
           image_path: 'images/sample.jpg',
           status: 'pending',
+        },
+      ],
+      themes: [
+        {
+          id: `theme-${Date.now()}`,
+          name: 'テーマ1',
+          activeTimeRange: '0:00-0:00',
+          weekdays: '毎日',
+          intervalRange: '120~360分',
+          tweetOrderMode: 1,
+          isActive: true,
+          memo: '投稿モード: 0=上から順 / 1=ランダム (数字だけでもOK) ｜ 下のシートを追加・複製するとテーマ別に管理できます',
+          tweets: [
+            {
+              id: 1,
+              text: `アカウント #${newIdx} からの最初の自動ツイートです！`,
+              post_time: '',
+              image_path: 'images/sample.jpg',
+              status: 'pending',
+            },
+          ],
         },
       ],
     };
@@ -217,6 +244,7 @@ export default function App() {
             accounts={accounts}
             settings={settings}
             onUpdateAccountTweets={handleUpdateAccountTweets}
+            onUpdateAccount={handleUpdateAccount}
           />
         )}
 

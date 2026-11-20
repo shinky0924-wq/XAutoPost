@@ -634,7 +634,7 @@ export const AccountManager: React.FC<AccountManagerProps> = ({
                   <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
                   <div>
                     <span className="text-xs text-neutral-300 font-medium block">
-                      連動Excelファイル（下タブ1: 設定 / 下タブ2: ツイート文章）
+                      連動Excelファイル（テーマ別シート管理・色付き）
                     </span>
                     <span className="text-[11px] font-mono text-emerald-400">
                       {currentAccount.excelFileName}
@@ -644,7 +644,7 @@ export const AccountManager: React.FC<AccountManagerProps> = ({
                 <button
                   onClick={() => downloadAccountMultiTabExcel(currentAccount, currentAccount.excelFileName)}
                   className="flex items-center gap-1.5 px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-emerald-400 rounded-lg text-xs font-semibold border border-neutral-700 transition cursor-pointer"
-                  title="このアカウント専用のExcelファイル（設定＋ツイート文章）をダウンロード"
+                  title="このアカウント専用のテーマ別Excelファイル（色付き・投稿時間対応）をダウンロード"
                 >
                   <Download className="w-3.5 h-3.5" />
                   出力 (.xlsx)

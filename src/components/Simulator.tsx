@@ -21,19 +21,22 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { AccountConfig, ExecutionLog, TweetItem, BotOperationSettings } from '../types';
-import { downloadAccountExcel } from '../utils/excelHelper';
+import { downloadAccountExcel, getAccountThemes } from '../utils/excelHelper';
+import { isTimeInRanges, isTodayAllowed } from '../utils/timeFilter';
 import { DEFAULT_SETTINGS } from '../data/defaultData';
 
 interface SimulatorProps {
   accounts: AccountConfig[];
   settings?: BotOperationSettings;
   onUpdateAccountTweets: (accountId: string, tweets: TweetItem[]) => void;
+  onUpdateAccount?: (updated: AccountConfig) => void;
 }
 
 export const Simulator: React.FC<SimulatorProps> = ({
   accounts,
   settings = DEFAULT_SETTINGS,
   onUpdateAccountTweets,
+  onUpdateAccount,
 }) => {
   const [isRunning, setIsRunning] = useState(false);
   const [speedMultiplier, setSpeedMultiplier] = useState<number>(3); // 3x by default for fast preview
@@ -133,7 +136,12 @@ export const Simulator: React.FC<SimulatorProps> = ({
     }
 
     const acc = activeAccounts[currentAccountIdx % activeAccounts.length];
-    const pendingTweets = acc.tweets.filter((t) => t.status === 'pending');
+    const themes = getAccountThemes(acc);
+    const activeTheme = themes.find((th) => th.isActive && isTodayAllowed(th.weekdays) && isTimeInRanges(th.activeTimeRange)) || themes[0];
+    const sourceTweets = activeTheme?.tweets || acc.tweets;
+    const pendingTweets = sourceTweets.filter((t) => t.status === 'pending');
+    const eligibleTweets = pendingTweets.filter((t) => isTimeInRanges(t.post_time));
+    const skippedByTime = pendingTweets.filter((t) => !isTimeInRanges(t.post_time));
     const batchLimit = acc.actionsPerBatch || settings.actionsPerRotation || 3;
 
     // 提案1: 現在のアカウントがバッチ上限に達したかチェック
@@ -170,21 +178,41 @@ export const Simulator: React.FC<SimulatorProps> = ({
       return;
     }
 
-    if (pendingTweets.length === 0) {
-      if (acc.repeatMode) {
-        addLog(acc, 'info', `🔄 [${acc.handle}] リピートモード: 全件投稿済みのためステータスをリセットします。`);
-        const resetTweets = acc.tweets.map((t) => ({ ...t, status: 'pending' as const, posted_at: '' }));
-        onUpdateAccountTweets(acc.id, resetTweets);
+    if (skippedByTime.length > 0 && eligibleTweets.length === 0) {
+      addLog(
+        acc,
+        'info',
+        `⏭️ [${acc.handle}] テーマ「${activeTheme?.name || 'テーマ1'}」の未投稿 ${skippedByTime.length} 件は投稿時間外のためステータス維持のまま即スキップします。`
+      );
+      setAccountActionCount(0);
+      setCurrentAccountIdx((prev) => (prev + 1) % activeAccounts.length);
+      return;
+    }
+
+    if (eligibleTweets.length === 0) {
+      if (acc.repeatMode && activeTheme) {
+        addLog(acc, 'info', `🔄 [${acc.handle}] テーマ「${activeTheme.name}」リピートモード: 全件投稿済みのためステータスをリセットします。`);
+        const resetTweets = sourceTweets.map((t) => ({ ...t, status: 'pending' as const, posted_at: '' }));
+        if (onUpdateAccount && acc.themes && acc.themes.length > 0) {
+          const nextThemes = acc.themes.map((th) =>
+            th.id === activeTheme.id ? { ...th, tweets: resetTweets } : th
+          );
+          onUpdateAccount({ ...acc, themes: nextThemes, tweets: nextThemes[0]?.tweets || acc.tweets });
+        } else {
+          onUpdateAccountTweets(acc.id, resetTweets);
+        }
       } else {
         addLog(acc, 'info', `✅ [${acc.handle}] 未投稿ツイートはありません。`);
       }
 
       const anyPending = activeAccounts.some((a) =>
-        a.tweets.some((t) => t.status === 'pending')
+        getAccountThemes(a).some(
+          (th) => th.isActive && th.tweets.some((t) => t.status === 'pending' && isTimeInRanges(t.post_time))
+        )
       );
 
       if (!anyPending && !acc.repeatMode) {
-        addLog(acc, 'success', '🎉 すべてのアカウントの全ツイート投稿が完了しました！');
+        addLog(acc, 'success', '🎉 すべてのアカウントの対象ツイート投稿が完了しました！');
         setIsRunning(false);
         return;
       }
@@ -195,8 +223,18 @@ export const Simulator: React.FC<SimulatorProps> = ({
       return;
     }
 
-    // Pick the first pending tweet
-    const targetTweet = pendingTweets[0];
+    if (skippedByTime.length > 0) {
+      addLog(
+        acc,
+        'info',
+        `⏭️ [${acc.handle}] 投稿時間外の ${skippedByTime.length} 件を即スキップし、対象ポストへ進みます。`
+      );
+    }
+
+    // Pick eligible tweet based on mode
+    const targetTweet = activeTheme?.tweetOrderMode === 1
+      ? eligibleTweets[Math.floor(Math.random() * eligibleTweets.length)]
+      : eligibleTweets[0];
     setActiveTweet({ account: acc, tweet: targetTweet });
 
     // 初回起動時のログ
@@ -232,12 +270,19 @@ export const Simulator: React.FC<SimulatorProps> = ({
       }
 
       const nowStr = new Date().toLocaleString('ja-JP');
-      const updatedTweets = acc.tweets.map((t) =>
+      const updatedTweets = sourceTweets.map((t) =>
         t.id === targetTweet.id
           ? { ...t, status: 'posted' as const, posted_at: nowStr }
           : t
       );
-      onUpdateAccountTweets(acc.id, updatedTweets);
+      if (onUpdateAccount && acc.themes && acc.themes.length > 0 && activeTheme) {
+        const nextThemes = acc.themes.map((th) =>
+          th.id === activeTheme.id ? { ...th, tweets: updatedTweets } : th
+        );
+        onUpdateAccount({ ...acc, themes: nextThemes, tweets: nextThemes[0]?.tweets || acc.tweets });
+      } else {
+        onUpdateAccountTweets(acc.id, updatedTweets);
+      }
 
       addLog(
         acc,
@@ -474,8 +519,9 @@ export const Simulator: React.FC<SimulatorProps> = ({
             </span>
             <div className="space-y-2">
               {accounts.map((acc) => {
-                const total = acc.tweets.length;
-                const posted = acc.tweets.filter((t) => t.status === 'posted').length;
+                const allThemeTweets = getAccountThemes(acc).flatMap((th) => th.tweets);
+                const total = allThemeTweets.length;
+                const posted = allThemeTweets.filter((t) => t.status === 'posted').length;
                 const percent = total > 0 ? Math.round((posted / total) * 100) : 0;
 
                 return (

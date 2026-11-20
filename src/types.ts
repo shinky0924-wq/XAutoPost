@@ -1,10 +1,23 @@
 export interface TweetItem {
   id: number;
   text: string;
-  image_path: string; // e.g. "images/photo1.jpg" or absolute path
+  post_time?: string; // e.g. "7～10", "22～2", "7～10, 18～21", or ""
+  image_path: string; // e.g. "images/photo1.jpg" or absolute path or folder
   status: 'pending' | 'posted' | 'failed' | 'skipped';
   posted_at?: string;
   error_message?: string;
+}
+
+export interface ThemeSheet {
+  id: string;
+  name: string; // e.g. "テーマ1", "お知らせ"
+  activeTimeRange: string; // e.g. "0:00-0:00"
+  weekdays: string; // e.g. "毎日", "平日", "月水金"
+  intervalRange: string; // e.g. "120~360分"
+  tweetOrderMode: number; // 0: 上から順, 1: ランダム
+  isActive: boolean; // true: 有効, false: 無効
+  memo?: string;
+  tweets: TweetItem[];
 }
 
 export interface AccountConfig {
@@ -28,15 +41,16 @@ export interface AccountConfig {
   excelFileName: string;
   minIntervalSec: number; // e.g. 60
   maxIntervalSec: number; // e.g. 600
-  // Excel「設定」タブ用
-  intervalMinMinutes?: number; // e.g. 1
-  intervalMaxMinutes?: number; // e.g. 10
+  intervalMinMinutes?: number; // e.g. 120
+  intervalMaxMinutes?: number; // e.g. 360
   activeTimeStart?: string; // e.g. "0:00"
   activeTimeEnd?: string; // e.g. "0:00"
   tweetOrderMode?: number; // 0: 上から順, 1: ランダム
   repeatMode: boolean; // if true, reset pending after all posted
   isActive: boolean;
   tweets: TweetItem[];
+  // テーマ別シート一覧（各シートが独立したテーマ＆設定を持つ）
+  themes?: ThemeSheet[];
   // 提案1: 1窓・順番交代ローテーション個別設定（省略時は全体設定に準拠）
   actionsPerBatch?: number; // 1アカウントの1回の巡回で処理する件数 (例: 3)
   dmTargets?: DmTargetItem[];

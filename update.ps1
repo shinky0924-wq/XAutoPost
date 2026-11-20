@@ -49,20 +49,18 @@ if ($portableDir) {
     Write-Host "※ 既存の配布フォルダが見つからなかったため、distフォルダに出力します。" -ForegroundColor Yellow
 }
 
-# 1. 必要な画像フォルダ（朝枠・昼枠・夕方枠・夜枠）の自動作成
-Write-Host "`n[1/5] 画像フォルダを確認・作成中..." -ForegroundColor Yellow
-$slotNames = @("朝枠", "昼枠", "夕方枠", "夜枠")
-foreach ($s in $slotNames) {
-    $localImg = Join-Path "images" $s
-    if (-not (Test-Path $localImg)) {
-        New-Item -ItemType Directory -Path $localImg -Force | Out-Null
-        Write-Host "  + フォルダ作成: $localImg" -ForegroundColor Green
+# 1. 必要フォルダ（images / log / screenshots）の確認・作成
+Write-Host "`n[1/4] images / log / screenshots フォルダを確認・作成中..." -ForegroundColor Yellow
+foreach ($subDir in @("images", "log", "screenshots")) {
+    if (-not (Test-Path $subDir)) {
+        New-Item -ItemType Directory -Path $subDir -Force | Out-Null
+        Write-Host "  + フォルダ作成: $subDir" -ForegroundColor Green
     }
     if ($portableDir) {
-        $portImg = Join-Path $portableDir (Join-Path "images" $s)
-        if (-not (Test-Path $portImg)) {
-            New-Item -ItemType Directory -Path $portImg -Force | Out-Null
-            Write-Host "  + フォルダ作成: $portImg" -ForegroundColor Green
+        $portSub = Join-Path $portableDir $subDir
+        if (-not (Test-Path $portSub)) {
+            New-Item -ItemType Directory -Path $portSub -Force | Out-Null
+            Write-Host "  + フォルダ作成: $portSub" -ForegroundColor Green
         }
     }
 }
@@ -84,7 +82,7 @@ foreach ($p in $pythonCandidates) {
 }
 if (-not $pyExe) {
     $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($cmd) { $pyExe = $cmd.Source }
+    if ($cmd -and ($cmd.Source -notmatch "WindowsApps")) { $pyExe = $cmd.Source }
 }
 if (-not $pyExe) {
     $cmdPy = Get-Command py -ErrorAction SilentlyContinue
@@ -98,21 +96,21 @@ if (-not $pyExe) {
 }
 Write-Host "使用Python: $pyExe" -ForegroundColor Gray
 
-# PyInstaller / openpyxl / playwright の確認・不足時は自動インストール
+# openpyxl / playwright / pyinstaller の確認・不足時は自動インストール
 & $pyExe -m PyInstaller --version *> $null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "PyInstaller が未導入のため自動インストールします..." -ForegroundColor Yellow
+    Write-Host "必要ライブラリを自動インストールします..." -ForegroundColor Yellow
     & $pyExe -m pip install pyinstaller playwright openpyxl pillow
 }
 
-# 3. Excelに日常ツイートシートを追加更新
-Write-Host "`n[2/5] Excelファイルの日常ツイートシートを更新中..." -ForegroundColor Yellow
-if (Test-Path "add_daily_tweets_excel.py") {
-    & $pyExe add_daily_tweets_excel.py
+# 3. Excelファイルのテーマ別レイアウト更新＆カラー書式保護
+Write-Host "`n[2/4] Excelファイルをテーマ別レイアウト・削除耐性カラー書式に更新中..." -ForegroundColor Yellow
+if (Test-Path "update_themes_excel.py") {
+    & $pyExe update_themes_excel.py
 }
 
-# 4. PyInstallerで X_AutoTweetBot.exe を再ビルド
-Write-Host "`n[3/5] 最新 X_AutoTweetBot.exe をビルド中 (PyInstaller)..." -ForegroundColor Yellow
+# 4. PyInstallerで X_AutoTweetBot.exe を再ビルド（必要な本体のみ）
+Write-Host "`n[3/4] 最新 X_AutoTweetBot.exe をビルド中 (PyInstaller)..." -ForegroundColor Yellow
 if (Test-Path "auto_tweet_playwright.py") {
     & $pyExe -m PyInstaller `
         --noconfirm `
@@ -124,20 +122,30 @@ if (Test-Path "auto_tweet_playwright.py") {
         auto_tweet_playwright.py
 }
 
-# 4.5. PyInstallerで chrome_launcher.exe をビルド
-Write-Host "`n[4/5] 初回手動ログイン用 chrome_launcher.exe をビルド中 (PyInstaller)..." -ForegroundColor Yellow
-if (Test-Path "chrome_launcher.py") {
-    & $pyExe -m PyInstaller `
-        --noconfirm `
-        --onefile `
-        --console `
-        --name "chrome_launcher" `
-        chrome_launcher.py
-}
-
-# 5. 配布フォルダへの上書き反映
-Write-Host "`n[5/5] 配布フォルダへ最新ファイルをコピー中..." -ForegroundColor Yellow
+# 5. 配布フォルダへの上書き反映（不要なランチャー類は生成しない＆旧不要ファイルを整理）
+Write-Host "`n[4/4] 配布フォルダへ必要ファイルのみをコピー中..." -ForegroundColor Yellow
 $distDir = "dist\X_AutoTweetBot"
+
+$obsoleteFiles = @(
+    "START_ROTATION.vbs",
+    "START_ROTATION.bat",
+    "CHROME_LAUNCHER.vbs",
+    "CHROME_LAUNCHER.bat",
+    "chrome_launcher.py",
+    "chrome_launcher.exe",
+    "START.bat",
+    "START_DM.bat",
+    "TEST_ONE_TWEET.bat",
+    "BUILD_EXE.bat",
+    "SETUP.bat",
+    "auto_dm_playwright.py",
+    "auto_tweet_selenium.py",
+    "auto_tweet_api.py",
+    "x_auto_tweet_colab.ipynb",
+    "dm_targets.xlsx",
+    "アプデ実行.bat",
+    "browser_auto_tweet.log"
+)
 
 if ($portableDir) {
     if (Test-Path $distDir) {
@@ -149,7 +157,6 @@ if ($portableDir) {
             Copy-Item "$distDir\_internal\*" -Destination "$portableDir\_internal" -Recurse -Force -ErrorAction SilentlyContinue
         }
 
-        # Playwrightブラウザの実体をポータブルフォルダへバックアップ配置
         $msBrowsers = "$env:LOCALAPPDATA\ms-playwright"
         $targetBrowsers = "$portableDir\_internal\playwright\driver\package\.local-browsers"
         if (Test-Path $msBrowsers) {
@@ -158,33 +165,51 @@ if ($portableDir) {
         }
     }
 
-    if (Test-Path "dist\chrome_launcher.exe") {
-        Copy-Item "dist\chrome_launcher.exe" -Destination "$portableDir\chrome_launcher.exe" -Force
-        Write-Host "✅ chrome_launcher.exe を配布フォルダにコピーしました！" -ForegroundColor Green
+    # 必要な最小限の実行・GUIファイルのみ配置（START_ROTATION.vbs等の重複・不要ファイルは生成しない）
+    foreach ($helperFile in @("auto_tweet_playwright.py", "update_themes_excel.py", "x_bot_gui.py", "X_BOT_GUI.vbs", "STOP_BOT.vbs")) {
+        if (Test-Path $helperFile) {
+            Copy-Item $helperFile -Destination (Join-Path $portableDir $helperFile) -Force
+        }
     }
 
-    $currentUpdatePs1 = Join-Path (Get-Location) "update.ps1"
-    $updateBatContent = "@echo off`r`nchcp 65001 > nul`r`necho 最新版へアップデート中...`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"$currentUpdatePs1`"`r`npause`r`n"
-    Set-Content -Path "$portableDir\アプデ実行.bat" -Value $updateBatContent -Encoding UTF8 -ErrorAction SilentlyContinue
+    # 旧バージョンの不要ランチャーを整理（Excel・画像・セッション・ログ・スクショ等のユーザーデータは一切触らない）
+    foreach ($obs in $obsoleteFiles) {
+        $obsPath = Join-Path $portableDir $obs
+        if (Test-Path $obsPath) {
+            Remove-Item $obsPath -Force -ErrorAction SilentlyContinue
+            Write-Host "  - 不要ファイル整理: $obs" -ForegroundColor DarkGray
+        }
+    }
+
+    try {
+        Get-ChildItem -Path $portableDir -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
+    } catch {}
 
     Write-Host "✅ 配布フォルダ ($portableDir) への反映が完了しました！" -ForegroundColor Green
 } else {
     Write-Host "✅ distフォルダ内にビルドが完了しました:" -ForegroundColor Green
-    if (Test-Path "dist\chrome_launcher.exe") {
-        Write-Host "   - $(Join-Path (Get-Location) 'dist\chrome_launcher.exe')" -ForegroundColor Green
-    }
     if (Test-Path "$distDir\X_AutoTweetBot.exe") {
         Write-Host "   - $(Join-Path (Get-Location) "$distDir\X_AutoTweetBot.exe")" -ForegroundColor Green
     }
 }
 
+# 作業フォルダ内の不要な一時ビルドファイルと旧不要ファイルを整理
+foreach ($obsLocal in @("START_ROTATION.vbs", "START_ROTATION.bat", "CHROME_LAUNCHER.vbs", "CHROME_LAUNCHER.bat", "chrome_launcher.py", "START.bat", "START_DM.bat", "TEST_ONE_TWEET.bat", "BUILD_EXE.bat", "SETUP.bat", "X_AutoTweetBot.spec", "chrome_launcher.spec", "browser_auto_tweet.log")) {
+    if (Test-Path $obsLocal) {
+        Remove-Item $obsLocal -Force -ErrorAction SilentlyContinue
+    }
+}
+if (Test-Path "build") {
+    Remove-Item "build" -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host ""
 Write-Host "========================================================" -ForegroundColor Green
-Write-Host "【アップデート完了】全機能の統合更新が完了しました！" -ForegroundColor Green
-Write-Host "1. 【初回手動ログイン】chrome_launcher.exe を追加（サイト勝手に開かず保持）" -ForegroundColor Yellow
-Write-Host "2. 【括弧付きフォルダ対応】X_BOT_配布用(Python不要) での起動エラー対策済み" -ForegroundColor Yellow
-Write-Host "3. 【案3: 画像クールダウン】同一垢30日間禁止 ＆ 他垢7日間共有禁止" -ForegroundColor Yellow
-Write-Host "4. 【日常ツイート100個＆保護】アップロード通信保護 ＋ 4枠フォルダ自動選出" -ForegroundColor Yellow
+Write-Host "【アップデート完了】最新機能・スッキリ構成へ更新しました！" -ForegroundColor Green
+Write-Host "1. 【アカウント別ログ】log/<アカウント名>.log にアカウント単位で自動保存" -ForegroundColor Yellow
+Write-Host "2. 【アカウント別スクショ】screenshots/<アカウント名>/ に投稿・エラー画面を保存" -ForegroundColor Yellow
+Write-Host "3. 【不要ファイル削除】X_BOT_GUI.vbs と STOP_BOT.vbs に集約（START_ROTATION.vbs等なし）" -ForegroundColor Yellow
+Write-Host "4. 【テーマ管理＆時間フィルタ】各シート1〜2行目に設定、時間外ポストは即スキップ" -ForegroundColor Cyan
 Write-Host "========================================================" -ForegroundColor Green
 Write-Host ""
 Read-Host "Enterキーを押すとウィンドウを閉じます"

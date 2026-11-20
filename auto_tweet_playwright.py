@@ -2,21 +2,27 @@
 # -*- coding: utf-8 -*-
 """
 ====================================================================
-X (Twitter) ブラウザ自動操縦・自動ツイートボット (完全統合・最新版)
+X (Twitter) ブラウザ自動操縦・自動ツイートボット (テーマ別管理・完全統合版)
 ====================================================================
 【統合機能一覧】
-  1. 【提案1】1窓・順番交代ローテーション (常に開くブラウザは1つのみ)
-  2. 【提案2】画像・動画通信ブロック ＋ アップロード通信保護 (メモリ約60%削減)
-  3. 【日常ツイート独立エンジン】朝枠・昼枠・夕方枠・夜枠の自動判定＆30日クールダウン
-  4. 【スピンタックス＆動的置換】{A|B|C} ＆ {月日}{曜日}{時間}{日付}
+  1. 【テーマ別マルチシート管理】
+     - Excelの下部シート（タブ）ごとに独立した「テーマ」として運用
+     - 各シート1〜2行目に「実行時間 / 曜日 / ポスト間隔 / 投稿モード / 有効/無効」を設定
+  2. 【ポスト別 投稿時間フィルタ＆即スキップ】
+     - 各ポストの「投稿時間」列（7～10, ７～１０, 7時から10時, 22～2, 7～10, 18～21 等）を判定
+     - 時間外のポストはステータスを変更せず即スキップして次のポストへ進む
+     - 空白のポストは通常通りテーマの実行時間・曜日に従って稼働
+  3. 【1窓・順番交代ローテーション & メディア通信ブロック】
+     - 常に開くブラウザは1つのみ ＆ アップロード通信を保護しつつ画像・動画読込を遮断
+  4. 【スピンタックス＆動的タグ置換】
+     - {A|B|C} ＆ {日付}{月日}{曜日}{時間}{時刻}{午前午後}
   5. 【案3: 画像クールダウン＆アカウント間重複防止】
      - 同一アカウント：30日間再選出禁止 (image_history.json)
      - 他アカウント：7日間共有禁止（同一IP重複対策）
   6. 【凍結アカウント即時永久除外】
-     - 凍結・制限検知時に即座にブラックリスト追加＆Excel除外、再起動不要で継続
-  7. 【chrome_launcher.exe 連携】
-     - 手動ログインで作成したプロファイル (browser_sessions/) を自動引き継ぎ
-  8. 【括弧付きフォルダ対応】
+     - 凍結・制限検知時にメモリ＆アカウント情報Excelから即座に除外し再起動不要で継続
+  7. 【chrome_launcher.exe 連携 & 括弧付きフォルダ対応】
+     - browser_sessions/ の手動ログイン済みプロファイルを自動引き継ぎ
      - X_BOT_配布用(Python不要) 等でも Playwright ドライバを正常起動
 ====================================================================
 """
@@ -33,8 +39,10 @@ import asyncio
 import tempfile
 import traceback
 import subprocess
+import unicodedata
 import openpyxl
-from datetime import datetime, timedelta
+from openpyxl.styles import Font, PatternFill
+from datetime import datetime, timedelta, time as dt_time
 from playwright.sync_api import sync_playwright
 
 if sys.platform == "win32":
@@ -44,21 +52,136 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] [%(levelname)s] [XBrowserBot] %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("browser_auto_tweet.log", encoding="utf-8")
-    ]
-)
-logger = logging.getLogger("XBrowserBot")
-
-
 def get_app_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def sanitize_filename_part(name: str) -> str:
+    cleaned = str(name or "").replace("@", "").strip()
+    cleaned = re.sub(r'[<>:"/\\|?*]', "_", cleaned)
+    return cleaned or "unknown"
+
+
+def get_log_dir() -> str:
+    d = os.path.join(get_app_dir(), "log")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def get_screenshot_dir(account_name: str | None = None) -> str:
+    base = os.path.join(get_app_dir(), "screenshots")
+    if account_name:
+        target = os.path.join(base, sanitize_filename_part(account_name))
+    else:
+        target = base
+    os.makedirs(target, exist_ok=True)
+    return target
+
+
+_LOG_FORMATTER = logging.Formatter('[%(asctime)s] [%(levelname)s] [XBrowserBot] %(message)s')
+_CURRENT_FILE_HANDLER: logging.FileHandler | None = None
+_CURRENT_LOG_PATH: str | None = None
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] [%(levelname)s] [XBrowserBot] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger("XBrowserBot")
+
+
+def switch_account_log(account_name: str | None = None):
+    """出力先ファイルを log/<アカウント名>.log（待機・システム時は log/system.log）へ切り替える"""
+    global _CURRENT_FILE_HANDLER, _CURRENT_LOG_PATH
+    try:
+        filename = f"{sanitize_filename_part(account_name)}.log" if account_name else "system.log"
+        target_path = os.path.abspath(os.path.join(get_log_dir(), filename))
+        if _CURRENT_LOG_PATH == target_path and _CURRENT_FILE_HANDLER is not None:
+            return
+
+        root_logger = logging.getLogger()
+        if _CURRENT_FILE_HANDLER is not None:
+            try:
+                _CURRENT_FILE_HANDLER.flush()
+                _CURRENT_FILE_HANDLER.close()
+            except Exception:
+                pass
+            try:
+                root_logger.removeHandler(_CURRENT_FILE_HANDLER)
+            except Exception:
+                pass
+            _CURRENT_FILE_HANDLER = None
+
+        fh = logging.FileHandler(target_path, encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(_LOG_FORMATTER)
+        root_logger.addHandler(fh)
+        _CURRENT_FILE_HANDLER = fh
+        _CURRENT_LOG_PATH = target_path
+    except Exception:
+        pass
+
+
+def close_account_log():
+    global _CURRENT_FILE_HANDLER, _CURRENT_LOG_PATH
+    root_logger = logging.getLogger()
+    if _CURRENT_FILE_HANDLER is not None:
+        try:
+            _CURRENT_FILE_HANDLER.flush()
+            _CURRENT_FILE_HANDLER.close()
+        except Exception:
+            pass
+        try:
+            root_logger.removeHandler(_CURRENT_FILE_HANDLER)
+        except Exception:
+            pass
+        _CURRENT_FILE_HANDLER = None
+        _CURRENT_LOG_PATH = None
+
+
+def save_account_screenshot(page, account_name: str = "", label: str = "capture", max_keep: int = 100) -> str | None:
+    """アカウント別フォルダ screenshots/<アカウント名>/ にスクショを保存"""
+    if page is None:
+        return None
+    try:
+        safe_acc = sanitize_filename_part(account_name or "system")
+        safe_lbl = sanitize_filename_part(label or "capture")
+        out_dir = get_screenshot_dir(safe_acc)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        filename = f"{ts}_{safe_lbl}.png"
+        out_path = os.path.join(out_dir, filename)
+        page.screenshot(path=out_path, timeout=10000)
+        logger.info(f"📸 スクショ保存: screenshots/{safe_acc}/{filename}")
+
+        if max_keep > 0:
+            try:
+                files = sorted(glob.glob(os.path.join(out_dir, "*.png")), key=os.path.getmtime)
+                for old_file in files[:-max_keep]:
+                    try:
+                        os.remove(old_file)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return out_path
+    except Exception as e:
+        logger.debug(f"スクショ保存スキップ: {e}")
+        return None
+
+
+switch_account_log(None)
+
+LEGACY_IGNORED_SHEETS = {"設定", "日常ツイート"}
+def normalize_text(val) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, datetime):
+        return val.strftime("%H:%M")
+    if isinstance(val, dt_time):
+        return val.strftime("%H:%M")
+    return unicodedata.normalize("NFKC", str(val)).strip()
 
 
 # ==========================================
@@ -144,23 +267,20 @@ def is_image_available(img_name, current_handle, history):
     return True, "OK"
 
 
-# 朝枠・昼枠・夕方枠・夜枠のフォルダからクールダウンを判定して選定
-def resolve_random_image_from_folder(raw_target, slot_name="", handle=""):
+def resolve_random_image_from_folder(raw_target, handle=""):
     target_path = str(raw_target or "").strip().replace('"', '').replace("'", "")
-    if target_path in ["(なし)", "なし", "none", "None"]:
+    if not target_path or target_path in ["(なし)", "なし", "none", "None"]:
         return None
 
     app_dir = get_app_dir()
     search_dirs = [
         target_path,
         os.path.join("images", target_path),
-        os.path.join("images", slot_name) if slot_name else "",
-        os.path.join(app_dir, target_path) if target_path else "",
-        os.path.join(app_dir, "images", target_path) if target_path else "",
-        os.path.join(app_dir, "images", slot_name) if slot_name else "",
+        os.path.join(app_dir, target_path),
+        os.path.join(app_dir, "images", target_path),
     ]
 
-    if target_path and os.path.isfile(target_path):
+    if os.path.isfile(target_path):
         return os.path.abspath(target_path)
 
     valid_folder = None
@@ -184,7 +304,6 @@ def resolve_random_image_from_folder(raw_target, slot_name="", handle=""):
     candidates = list(set(candidates))
     history = load_image_history()
 
-    # クールダウン（自垢30日、他垢7日）をクリアした画像のみを候補にする
     available_files = []
     for fpath in candidates:
         fname = os.path.basename(fpath)
@@ -194,10 +313,12 @@ def resolve_random_image_from_folder(raw_target, slot_name="", handle=""):
 
     if available_files:
         chosen = random.choice(available_files)
-        logger.info(f"📸 画像フォルダ [{os.path.basename(valid_folder)}] から選出（クールダウン合格: {os.path.basename(chosen)} / 候補数: {len(available_files)}/{len(candidates)}）")
+        logger.info(
+            f"📸 画像フォルダ [{os.path.basename(valid_folder)}] から選出"
+            f"（クールダウン合格: {os.path.basename(chosen)} / 候補数: {len(available_files)}/{len(candidates)}）"
+        )
         return os.path.abspath(chosen)
 
-    # 全画像がクールダウン中の場合、最も昔に使われた画像を安全にフォールバック選出
     logger.warning(f"⚠️ [{os.path.basename(valid_folder)}] の全画像がクールダウン待機中です。最も過去に使用された画像を安全に再利用します。")
 
     def get_last_used_dt(fpath):
@@ -243,114 +364,190 @@ def replace_dynamic_tags(text: str) -> str:
     return text
 
 
-def parse_time_str(val):
-    if not val:
+# ==========================================
+# 時間帯・曜日・間隔パーサー（全角・日本語・複数範囲・日またぎ対応）
+# ==========================================
+def parse_single_time_to_minutes(token: str) -> int | None:
+    """
+    単一時刻文字列（例: "7", "07:00", "7時", "7時半", "7時30分", "22:00", "24:00"）を分(0..1440)へ変換
+    """
+    s = normalize_text(token)
+    if not s:
         return None
-    s = str(val).strip()
-    try:
-        parts = s.split(":")
-        h = int(parts[0])
-        m = int(parts[1]) if len(parts) > 1 else 0
-        return h * 60 + m
-    except Exception:
+    s = re.sub(r'\s+', '', s)
+    # 先頭の不要な修飾語（例: 翌, 午前）を取り除く補助（ただし午後対応）
+    is_pm = False
+    if "午後" in s or "pm" in s.lower():
+        is_pm = True
+    s_clean = re.sub(r'(翌|午前|午後|am|pm)', '', s, flags=re.IGNORECASE)
+
+    # パターン1: HH:MM または HH時MM分 / HH時半 / HH時
+    m = re.match(r'^(\d{1,2})\s*(?::(\d{1,2})|時(?:(半)|(\d{1,2})分?)?)?$', s_clean)
+    if not m:
         return None
 
+    hour = int(m.group(1))
+    if m.group(2) is not None:
+        minute = int(m.group(2))
+    elif m.group(3) == "半":
+        minute = 30
+    elif m.group(4) is not None:
+        minute = int(m.group(4))
+    else:
+        minute = 0
 
-def is_current_time_in_range(time_range_str):
-    if not time_range_str:
-        return False
-    try:
-        s_str, e_str = str(time_range_str).split("-")
-        s_min = parse_time_str(s_str.strip())
-        e_min = parse_time_str(e_str.strip())
+    if is_pm and 1 <= hour <= 11:
+        hour += 12
+
+    if hour == 24 and minute == 0:
+        return 24 * 60
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour * 60 + minute
+
+
+def is_time_in_ranges(time_spec, now_dt: datetime | None = None) -> bool:
+    """
+    柔軟な投稿時間・実行時間判定:
+      - 空白 / None / "0:00-0:00" / "24時間" -> True（常に投稿可能）
+      - "7～10", "７～１０", "7〜10", "7-10", "7時から10時", "7時～10時", "7:00-10:00"
+        -> 7:00 <= 現在時刻 <= 10:00 の間 True（6:59 や 10:01 は False）
+      - 日またぎ: "22～2" -> 22:00〜翌2:00 (現在 >= 22:00 または 現在 <= 2:00)
+      - 複数時間帯: "7～10, 18～21"（カンマ・読点区切り）-> いずれかに一致で True
+    """
+    raw = normalize_text(time_spec)
+    if not raw or raw.lower() in ("none", "nan", "終日", "24時間", "いつでも", "常時", "all"):
+        return True
+
+    if now_dt is None:
+        now_dt = datetime.now()
+    cur_min = now_dt.hour * 60 + now_dt.minute
+
+    segments = [seg.strip() for seg in re.split(r'[,、;\n/]+', raw) if seg.strip()]
+    if not segments:
+        return True
+
+    valid_range_found = False
+    for seg in segments:
+        # 区切り文字を "~" に統一（"から", "〜", "～", "−", "–", "—", "ー", "-", "to"）
+        unified = re.sub(r'(?:から|〜|～|~|−|–|—|ー|-|\bto\b)', '~', seg, flags=re.IGNORECASE)
+        parts = [p.strip() for p in unified.split('~') if p.strip()]
+        if len(parts) < 2:
+            # 単一時刻のみ書かれている場合（例: "8時" -> 8:00〜8:59相当ではなく一致判定、解釈不能なら次へ）
+            single_m = parse_single_time_to_minutes(parts[0]) if parts else None
+            if single_m is not None:
+                valid_range_found = True
+                if cur_min == single_m:
+                    return True
+            continue
+
+        s_min = parse_single_time_to_minutes(parts[0])
+        e_min = parse_single_time_to_minutes(parts[1])
         if s_min is None or e_min is None:
-            return False
+            continue
 
-        now = datetime.now()
-        cur_min = now.hour * 60 + now.minute
-        if s_min < e_min:
-            return s_min <= cur_min < e_min
+        valid_range_found = True
+        # 0:00-0:00 は24時間稼働扱い
+        if s_min == 0 and e_min == 0:
+            return True
+
+        if s_min <= e_min:
+            # 通常帯（例: 7:00〜10:00 は 7:00〜10:00 ちょうどまで対象、10:01から対象外）
+            if s_min <= cur_min <= e_min:
+                return True
         else:
-            return cur_min >= s_min or cur_min < e_min
-    except Exception:
-        return False
+            # 日またぎ（例: 22:00〜翌2:00）
+            if cur_min >= s_min or cur_min <= e_min:
+                return True
+
+    # 有効な書式が1つも解釈できない入力だった場合は安全のためブロックせずFalseにはしない？
+    # いや、誤記でも意図せず発火しないよう valid_range_found なら False、未記載扱いなら True
+    return False if valid_range_found else True
 
 
-# 日常ツイートの選出（30日クールダウン＆画像フォルダ選定）
-def get_eligible_daily_tweet(excel_path, handle):
-    if not excel_path or not os.path.exists(excel_path):
-        return None
+def is_today_allowed(weekday_spec, now_dt: datetime | None = None) -> bool:
+    """
+    曜日設定を判定:
+      - 空白 / 毎日 / 全日 / * / all -> True
+      - 平日 / 月～金 / 月-金 -> 月〜金 True
+      - 土日 / 週末 -> 土日 True
+      - 月水金 / 月,火,木 など -> 該当曜日のみ True
+    """
+    raw = normalize_text(weekday_spec)
+    if not raw or raw.lower() in ("毎日", "全日", "すべて", "all", "*", "none", "nan"):
+        return True
+
+    if now_dt is None:
+        now_dt = datetime.now()
+    wd = now_dt.weekday()  # 0=月 .. 6=日
+
+    if "平日" in raw or "月~金" in raw or "月-金" in raw or "月〜金" in raw:
+        return wd < 5
+    if "土日" in raw or "週末" in raw:
+        return wd >= 5
+
+    jp_days = ["月", "火", "水", "木", "金", "土", "日"]
+    en_days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+    matched_any_token = False
+    for ch in jp_days:
+        if ch in raw:
+            matched_any_token = True
+    low = raw.lower()
+    for ed in en_days:
+        if ed in low:
+            matched_any_token = True
+
+    if not matched_any_token:
+        return True
+
+    return (jp_days[wd] in raw) or (en_days[wd] in low)
+
+
+def parse_interval_seconds(interval_spec) -> tuple[int, int]:
+    """
+    ポスト間隔（例: "120~360分", "60-120", "30秒", "1~2時間"）を (min_sec, max_sec) に変換
+    """
+    default_min, default_max = 120 * 60, 360 * 60
+    raw = normalize_text(interval_spec)
+    if not raw:
+        return default_min, default_max
+
+    unit_mult = 60
+    if "秒" in raw or raw.lower().endswith("s") or "sec" in raw.lower():
+        unit_mult = 1
+    elif "時間" in raw or "hour" in raw.lower() or raw.lower().endswith("h"):
+        unit_mult = 3600
+
+    nums = re.findall(r'\d+(?:\.\d+)?', raw)
+    if not nums:
+        return default_min, default_max
+
     try:
-        wb = openpyxl.load_workbook(excel_path, data_only=True)
-        if "日常ツイート" not in wb.sheetnames:
-            return None
-        ws = wb["日常ツイート"]
-
-        now = datetime.now()
-        today_str = now.strftime("%Y/%m/%d")
-        cooldown_days = 30
-        candidates = []
-
-        for r in range(2, ws.max_row + 1):
-            slot_name = str(ws.cell(r, 1).value or "").strip()
-            time_range = str(ws.cell(r, 2).value or "").strip()
-            raw_text = str(ws.cell(r, 3).value or "").strip()
-            status = str(ws.cell(r, 4).value or "").strip()
-            last_date_val = str(ws.cell(r, 5).value or "").strip()
-            raw_img_folder = str(ws.cell(r, 7).value or "").strip()
-
-            if status not in ["有効", "active", "1", "ON", "on"]:
-                continue
-            if not is_current_time_in_range(time_range):
-                continue
-            if last_date_val.startswith(today_str):
-                continue
-
-            is_cooldown_ok = True
-            if last_date_val:
-                try:
-                    last_dt = datetime.strptime(last_date_val[:10], "%Y/%m/%d")
-                    if (now - last_dt).days < cooldown_days:
-                        is_cooldown_ok = False
-                except Exception:
-                    pass
-            if not is_cooldown_ok:
-                continue
-
-            candidates.append({
-                "row": r,
-                "slot_name": slot_name,
-                "raw_text": raw_text,
-                "raw_img": raw_img_folder
-            })
-
-        if candidates:
-            chosen = random.choice(candidates)
-            final_text = expand_spintax(chosen["raw_text"])
-            final_text = replace_dynamic_tags(final_text)
-            chosen["final_text"] = final_text
-            chosen["image"] = resolve_random_image_from_folder(chosen["raw_img"], chosen["slot_name"], handle)
-            return chosen
-    except Exception as e:
-        logger.error(f"日常ツイート取得エラー: {e}")
-    return None
+        v1 = max(1, int(float(nums[0]) * unit_mult))
+        v2 = max(v1, int(float(nums[1]) * unit_mult)) if len(nums) >= 2 else v1
+        return min(v1, v2), max(v1, v2)
+    except Exception:
+        return default_min, default_max
 
 
-def update_daily_tweet_status(excel_path, row_idx):
-    now = datetime.now()
-    for attempt in range(3):
-        try:
-            wb = openpyxl.load_workbook(excel_path)
-            ws = wb["日常ツイート"]
-            ws.cell(row_idx, 5).value = now.strftime("%Y/%m/%d")
-            ws.cell(row_idx, 6).value = now.strftime("%Y/%m/%d %H:%M:%S")
-            wb.save(excel_path)
-            logger.info(f"日常ツイート更新成功: 行{row_idx} (最終投稿日更新)")
-            return
-        except PermissionError:
-            time.sleep(2)
-        except Exception:
-            break
+def parse_post_mode(mode_spec) -> int:
+    """0: 上から順 / 1: ランダム"""
+    raw = normalize_text(mode_spec)
+    if not raw:
+        return 1
+    if raw.startswith("0") or ("上" in raw and "ランダム" not in raw) or ("順" in raw and "ランダム" not in raw):
+        return 0
+    return 1
+
+
+def parse_theme_active(active_spec) -> bool:
+    raw = normalize_text(active_spec).lower()
+    if not raw:
+        return True
+    if raw in ("無効", "停止", "off", "false", "0", "disable", "disabled", "×", "✕"):
+        return False
+    return True
 
 
 ALL_EMOJIS = [
@@ -401,7 +598,7 @@ def resolve_image_path(raw_path, handle=""):
     clean = str(raw_path).replace('"', '').replace("'", "").strip()
     if not clean or clean in ["(なし)", "なし", "none", "None"]:
         return None
-    if os.path.isdir(clean):
+    if os.path.isdir(clean) or os.path.isdir(os.path.join("images", clean)):
         return resolve_random_image_from_folder(clean, handle=handle)
     if os.path.exists(clean):
         return os.path.abspath(clean)
@@ -518,144 +715,212 @@ def check_suspension_or_lock(page):
     return None
 
 
-def get_settings(excel_path):
-    val_min = 60
-    val_max = 120
+# ==========================================
+# テーマ別マルチシート読み込み＆ステータス更新
+# ==========================================
+def _detect_sheet_layout(ws):
+    """
+    テーマシートのヘッダー構造（1〜2行目テーマ設定 + 4行目テーブルヘッダー）
+    および旧シート（1行目テーブルヘッダー）の両方を判別する
+    """
+    a1 = normalize_text(ws.cell(1, 1).value)
+    b1 = normalize_text(ws.cell(1, 2).value)
+    c1 = normalize_text(ws.cell(1, 3).value)
+    has_theme_banner = ("実行時間" in a1) and ("曜日" in b1 or "間隔" in c1)
+
     settings = {
-        "min_interval": 60, "max_interval": 120, "mode": 0,
-        "start_time_min": None, "end_time_min": None
+        "time_range": "0:00-0:00",
+        "weekdays": "毎日",
+        "min_interval": 120 * 60,
+        "max_interval": 360 * 60,
+        "mode": 1,
+        "enabled": True,
     }
-    if not excel_path or not os.path.exists(excel_path):
-        return settings
-    try:
-        wb = openpyxl.load_workbook(excel_path, data_only=True)
-        if "設定" in wb.sheetnames:
-            ws = wb["設定"]
-            c_min = ws.cell(3, 1).value
-            c_max = None
-            for col in range(2, ws.max_column + 1):
-                if str(ws.cell(3, col).value or "").strip() == "~":
-                    c_max = ws.cell(3, col + 1).value
-                    break
-            if c_max is None:
-                c_max = ws.cell(3, 4).value
 
-            try:
-                if c_min is not None:
-                    val_min = int(float(str(c_min).strip()) * 60)
-            except Exception:
-                val_min = 60
-            try:
-                if c_max is not None:
-                    val_max = int(float(str(c_max).strip()) * 60)
-            except Exception:
-                val_max = val_min
+    if has_theme_banner:
+        settings["time_range"] = normalize_text(ws.cell(2, 1).value) or "0:00-0:00"
+        settings["weekdays"] = normalize_text(ws.cell(2, 2).value) or "毎日"
+        iv_min, iv_max = parse_interval_seconds(ws.cell(2, 3).value)
+        settings["min_interval"] = iv_min
+        settings["max_interval"] = iv_max
+        settings["mode"] = parse_post_mode(ws.cell(2, 4).value)
+        settings["enabled"] = parse_theme_active(ws.cell(2, 5).value)
 
-            final_min = max(1, min(val_min, val_max))
-            final_max = max(val_min, val_max)
-            settings["min_interval"] = final_min
-            settings["max_interval"] = final_max
+    header_row = None
+    scan_start = 3 if has_theme_banner else 1
+    scan_end = min(15, max(ws.max_row, 4))
+    for r in range(scan_start, scan_end + 1):
+        vals = [normalize_text(ws.cell(r, c).value).lower() for c in range(1, min(ws.max_column, 12) + 1)]
+        if any(v in ("ツイート文章", "ポスト文章", "ツイート本文", "ポスト本文", "本文", "text") for v in vals):
+            header_row = r
+            break
 
-            for r in range(1, ws.max_row + 1):
-                val = str(ws.cell(r, 1).value or "")
-                if "時:分" in val or "ツイート実行時間" in val:
-                    target_r = r + 1 if "時:分" in val else r + 2
-                    s_min = parse_time_str(ws.cell(target_r, 1).value)
-                    e_min = parse_time_str(ws.cell(target_r, 3).value)
-                    if s_min is not None and e_min is not None and s_min != e_min:
-                        settings["start_time_min"] = s_min
-                        settings["end_time_min"] = e_min
-                    break
+    if header_row is None:
+        header_row = 4 if has_theme_banner else 1
 
-            for r in range(4, ws.max_row + 1):
-                val_text = str(ws.cell(r, 1).value or "")
-                if "モード" in val_text:
-                    mode_val = ws.cell(r + 2, 1).value
-                    if mode_val is not None and str(mode_val).strip() in ["1", "ランダム"]:
-                        settings["mode"] = 1
-                    break
-    except Exception as e:
-        logger.warning(f"設定取得エラー: {e}")
-    return settings
+    text_col = 2
+    post_time_col = 3 if has_theme_banner else None
+    img_col = 4 if has_theme_banner else 3
+    status_col = 5 if has_theme_banner else 4
+    date_col = 6 if has_theme_banner else 5
 
+    for c in range(1, ws.max_column + 1):
+        h = normalize_text(ws.cell(header_row, c).value).lower()
+        if h in ("ツイート文章", "ポスト文章", "ツイート本文", "ポスト本文", "本文", "text"):
+            text_col = c
+        elif h in ("投稿時間", "投稿時間帯", "時間指定", "post_time", "time"):
+            post_time_col = c
+        elif h in ("画像パス", "画像", "画像フォルダ", "image_path", "image"):
+            img_col = c
+        elif h in ("ステータス", "status"):
+            status_col = c
+        elif h in ("投稿日時", "posted_at"):
+            date_col = c
 
-def is_within_operating_hours(settings):
-    s_min = settings.get("start_time_min")
-    e_min = settings.get("end_time_min")
-    if s_min is None or e_min is None:
-        return True
-    now = datetime.now()
-    cur_min = now.hour * 60 + now.minute
-    if s_min < e_min:
-        return s_min <= cur_min < e_min
-    else:
-        return cur_min >= s_min or cur_min < e_min
+    return {
+        "has_theme_banner": has_theme_banner,
+        "settings": settings,
+        "header_row": header_row,
+        "text_col": text_col,
+        "post_time_col": post_time_col,
+        "img_col": img_col,
+        "status_col": status_col,
+        "date_col": date_col,
+    }
 
 
-def reset_all_tweets_status(excel_path):
+def reset_all_tweets_status(excel_path: str, sheet_name: str, header_row: int, text_col: int, status_col: int, date_col: int | None = None):
     try:
         wb = openpyxl.load_workbook(excel_path)
-        ws = wb["ツイート文章"] if "ツイート文章" in wb.sheetnames else wb.active
-        headers = [str(cell.value or "").strip() for cell in ws[1]]
-        status_col = 4
-        for idx, h in enumerate(headers):
-            if h in ["ステータス", "status"]:
-                status_col = idx + 1
-                break
-        for r in range(2, ws.max_row + 1):
-            if ws.cell(r, 2).value:
-                ws.cell(r, status_col).value = ""
+        if sheet_name not in wb.sheetnames:
+            return
+        ws = wb[sheet_name]
+        for r in range(header_row + 1, ws.max_row + 1):
+            if ws.cell(r, text_col).value:
+                st_cell = ws.cell(r, status_col)
+                st_cell.value = ""
+                st_cell.fill = PatternFill(
+                    start_color="F1F5F9" if r % 2 == 0 else "FFFFFF",
+                    end_color="F1F5F9" if r % 2 == 0 else "FFFFFF",
+                    fill_type="solid"
+                )
+                if date_col:
+                    ws.cell(r, date_col).value = ""
         wb.save(excel_path)
-        logger.info(f"[{os.path.basename(excel_path)}] 全ツイート完了のためステータス自動リセット。")
-    except Exception:
-        pass
+        logger.info(f"[{os.path.basename(excel_path)} / {sheet_name}] 全ポスト完了のためステータスを自動リセットしました。")
+    except Exception as e:
+        logger.warning(f"ステータスリセットエラー ({sheet_name}): {e}")
 
 
-def load_tweets(excel_path, handle=""):
-    tweets = []
+def load_theme_sheets(excel_path: str, handle: str = "", now_dt: datetime | None = None) -> list[dict]:
+    """
+    1つのアカウントExcel内の全テーマシートを読み込む。
+    返却リストの各要素は 1つのテーマシートを表し、
+    「投稿時間」列でフィルタ済みの即投稿可能ツイート(eligible_tweets)と未投稿全体件数を含む。
+    """
+    themes = []
     if not excel_path or not os.path.exists(excel_path):
-        return tweets
+        return themes
+    if now_dt is None:
+        now_dt = datetime.now()
+
     try:
         wb = openpyxl.load_workbook(excel_path, data_only=True)
-        ws = wb["ツイート文章"] if "ツイート文章" in wb.sheetnames else wb.active
-        headers = [str(cell.value or "").strip() for cell in ws[1]]
-        text_col, img_col, status_col, date_col = 2, 3, 4, 5
-        for idx, h in enumerate(headers):
-            if h in ["ツイート文章", "text", "本文"]: text_col = idx + 1
-            elif h in ["画像パス", "画像"]: img_col = idx + 1
-            elif h in ["ステータス", "status"]: status_col = idx + 1
-            elif h in ["投稿日時"]: date_col = idx + 1
-
-        for r in range(2, ws.max_row + 1):
-            text = str(ws.cell(r, text_col).value or "").strip()
-            if not text:
+        for sheet_name in wb.sheetnames:
+            if sheet_name in LEGACY_IGNORED_SHEETS:
                 continue
-            raw_img = str(ws.cell(r, img_col).value or "").strip()
-            resolved_img = resolve_image_path(raw_img, handle=handle)
-            status = str(ws.cell(r, status_col).value or "").strip().lower()
-            if status not in ["posted", "投稿済み", "完了", "skipped"]:
-                tweets.append({
-                    "row": r, "text": text, "image": resolved_img,
-                    "status_col": status_col, "date_col": date_col
-                })
+            ws = wb[sheet_name]
+            layout = _detect_sheet_layout(ws)
+            st = layout["settings"]
+
+            header_row = layout["header_row"]
+            text_col = layout["text_col"]
+            post_time_col = layout["post_time_col"]
+            img_col = layout["img_col"]
+            status_col = layout["status_col"]
+            date_col = layout["date_col"]
+
+            total_count = 0
+            unposted_tweets = []
+            eligible_tweets = []
+            skipped_by_time_count = 0
+
+            for r in range(header_row + 1, ws.max_row + 1):
+                raw_text = ws.cell(r, text_col).value
+                text = str(raw_text).strip() if raw_text is not None else ""
+                if not text:
+                    continue
+                total_count += 1
+
+                status = normalize_text(ws.cell(r, status_col).value).lower()
+                if status in ("posted", "投稿済み", "投稿済", "完了", "skipped", "スキップ"):
+                    continue
+
+                raw_pt = ws.cell(r, post_time_col).value if post_time_col else ""
+                pt_str = normalize_text(raw_pt)
+                raw_img = ws.cell(r, img_col).value if img_col else ""
+
+                item = {
+                    "row": r,
+                    "raw_text": text,
+                    "post_time": pt_str,
+                    "raw_img": str(raw_img or "").strip(),
+                    "status_col": status_col,
+                    "date_col": date_col,
+                }
+                unposted_tweets.append(item)
+
+                # 投稿時間判定：未設定(空白)なら通常通り対象、設定あり＆時間外ならステータスを変えず即スキップ！
+                if pt_str and not is_time_in_ranges(pt_str, now_dt=now_dt):
+                    skipped_by_time_count += 1
+                    continue
+
+                eligible_tweets.append(item)
+
+            themes.append({
+                "sheet_name": sheet_name,
+                "settings": st,
+                "layout": layout,
+                "total_count": total_count,
+                "unposted_count": len(unposted_tweets),
+                "skipped_by_time_count": skipped_by_time_count,
+                "eligible_tweets": eligible_tweets,
+            })
     except Exception as e:
-        logger.error(f"ツイート読み込みエラー: {e}")
-    return tweets
+        logger.error(f"テーマ読み込みエラー ({os.path.basename(excel_path)}): {e}")
+    return themes
 
 
-def update_excel_status(excel_path, row_idx, status_col, date_col, status_text):
+def update_excel_status(excel_path: str, sheet_name: str, row_idx: int, status_col: int, date_col: int, status_text: str):
     for attempt in range(3):
         try:
             wb = openpyxl.load_workbook(excel_path)
-            ws = wb["ツイート文章"] if "ツイート文章" in wb.sheetnames else wb.active
-            ws.cell(row_idx, status_col).value = status_text
+            if sheet_name not in wb.sheetnames:
+                return
+            ws = wb[sheet_name]
+            st_cell = ws.cell(row_idx, status_col)
+            st_cell.value = status_text
+
+            # ステータス表示を見やすい色で維持（削除耐性・条件付き書式とも協調）
+            st_low = status_text.lower()
+            if st_low in ("posted", "投稿済み", "投稿済", "完了"):
+                st_cell.fill = PatternFill(start_color="DCFCE7", end_color="DCFCE7", fill_type="solid")
+                st_cell.font = Font(name="Yu Gothic UI", size=10, bold=True, color="15803D")
+            elif st_low in ("skipped", "スキップ"):
+                st_cell.fill = PatternFill(start_color="E2E8F0", end_color="E2E8F0", fill_type="solid")
+                st_cell.font = Font(name="Yu Gothic UI", size=10, bold=False, color="475569")
+            elif st_low in ("failed", "失敗", "エラー"):
+                st_cell.fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
+                st_cell.font = Font(name="Yu Gothic UI", size=10, bold=True, color="B91C1C")
+
             ws.cell(row_idx, date_col).value = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
             wb.save(excel_path)
-            logger.info(f"Excel更新完了: 行{row_idx} -> {status_text}")
+            logger.info(f"Excel更新完了: [{sheet_name}] 行{row_idx} -> {status_text}")
             return
         except PermissionError:
             time.sleep(2)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Excel更新エラー: {e}")
             break
 
 
@@ -685,21 +950,27 @@ def check_for_errors_or_duplicates(page):
     try:
         content = page.content()
         for dup in duplicate_texts:
-            if dup in content: return "duplicate"
+            if dup in content:
+                return "duplicate"
         for err in error_texts:
-            if err in content: return "general_error"
+            if err in content:
+                return "general_error"
     except Exception:
         pass
     return None
 
 
-def execute_single_post_attempt(page, text_to_send, image_path):
+def execute_single_post_attempt(page, text_to_send, image_path, account_name: str = ""):
     try:
+        if is_stop_requested():
+            return "aborted"
         page.goto("https://x.com/compose/post", wait_until="domcontentloaded", timeout=30000)
-        time.sleep(random.uniform(2.0, 3.0))
+        if interruptible_sleep(random.uniform(2.0, 3.0)):
+            return "aborted"
 
         susp_msg = check_suspension_or_lock(page)
         if susp_msg:
+            save_account_screenshot(page, account_name, "suspended")
             return f"suspended:{susp_msg}"
 
         human_mouse_move(page)
@@ -707,10 +978,17 @@ def execute_single_post_attempt(page, text_to_send, image_path):
         try:
             editor.wait_for(state="visible", timeout=8000)
         except Exception:
+            if is_stop_requested():
+                return "aborted"
             susp_msg = check_suspension_or_lock(page)
             if susp_msg:
+                save_account_screenshot(page, account_name, "suspended")
                 return f"suspended:{susp_msg}"
+            save_account_screenshot(page, account_name, "error_textbox_missing")
             return "general_error"
+
+        if is_stop_requested():
+            return "aborted"
 
         box = editor.bounding_box()
         if box:
@@ -722,20 +1000,24 @@ def execute_single_post_attempt(page, text_to_send, image_path):
         else:
             editor.click()
 
-        time.sleep(random.uniform(0.3, 0.6))
+        if interruptible_sleep(random.uniform(0.3, 0.6)):
+            return "aborted"
         human_typing(page, text_to_send)
-        time.sleep(random.uniform(0.8, 1.5))
+        if interruptible_sleep(random.uniform(0.8, 1.5)):
+            return "aborted"
 
         if image_path and os.path.exists(image_path):
             try:
                 logger.info(f"📸 画像ファイルを添付中: {os.path.basename(image_path)}")
                 file_input = page.locator("input[type='file'][data-testid='fileInput']").first
                 file_input.set_input_files(image_path)
-                time.sleep(random.uniform(3.5, 5.0))
+                if interruptible_sleep(random.uniform(3.5, 5.0)):
+                    return "aborted"
             except Exception as img_err:
                 logger.warning(f"画像添付エラー: {img_err}")
 
-        time.sleep(random.uniform(0.5, 1.0))
+        if interruptible_sleep(random.uniform(0.5, 1.0)):
+            return "aborted"
 
         btn = page.locator('[data-testid="tweetButton"]').first
         btn_box = btn.bounding_box()
@@ -749,19 +1031,27 @@ def execute_single_post_attempt(page, text_to_send, image_path):
         time.sleep(random.uniform(3.0, 4.0))
         susp_msg = check_suspension_or_lock(page)
         if susp_msg:
+            save_account_screenshot(page, account_name, "suspended")
             return f"suspended:{susp_msg}"
 
         err_type = check_for_errors_or_duplicates(page)
         if err_type:
+            save_account_screenshot(page, account_name, f"error_{err_type}")
             return err_type
+        save_account_screenshot(page, account_name, "posted")
         return "success"
     except Exception as e:
+        if is_stop_requested():
+            return "aborted"
         logger.error(f"投稿実行エラー: {e}")
+        save_account_screenshot(page, account_name, "error_exception")
         return "general_error"
 
 
-def post_tweet_with_smart_retry(page, original_text, image_path):
-    res1 = execute_single_post_attempt(page, original_text, image_path)
+def post_tweet_with_smart_retry(page, original_text, image_path, account_name: str = ""):
+    res1 = execute_single_post_attempt(page, original_text, image_path, account_name=account_name)
+    if res1 == "aborted" or is_stop_requested():
+        return "aborted"
     if res1.startswith("suspended:"):
         return res1
     if res1 == "success":
@@ -777,7 +1067,12 @@ def post_tweet_with_smart_retry(page, original_text, image_path):
     except Exception:
         pass
 
-    res2 = execute_single_post_attempt(page, spaced_text, image_path)
+    if is_stop_requested():
+        return "aborted"
+
+    res2 = execute_single_post_attempt(page, spaced_text, image_path, account_name=account_name)
+    if res2 == "aborted" or is_stop_requested():
+        return "aborted"
     if res2.startswith("suspended:"):
         return res2
     if res2 == "success":
@@ -855,10 +1150,6 @@ def _to_short_path(path_str: str) -> str:
 
 
 def _ensure_clean_driver_junction(real_driver_dir: str) -> str | None:
-    """
-    括弧・日本語を含まないパス（%LOCALAPPDATA%\\x_bot_pw_driver 等）に
-    NTFSディレクトリジャンクションを作成し、ドライバディレクトリをクリーンに参照可能にする。
-    """
     if not os.path.isdir(real_driver_dir):
         return None
 
@@ -873,10 +1164,8 @@ def _ensure_clean_driver_junction(real_driver_dir: str) -> str | None:
             continue
         if _has_cmd_special_chars(parent):
             continue
-        # パスに日本語等が含まれていても問題ない純ASCIIパスか優先確認
         junction_path = os.path.join(parent, "x_bot_pw_driver")
         try:
-            # 既存のジャンクションまたはリンク先が古い場合は作り直す
             if os.path.exists(junction_path):
                 try:
                     same_target = (
@@ -906,7 +1195,6 @@ def _ensure_clean_driver_junction(real_driver_dir: str) -> str | None:
 
 
 def _build_clean_cmd_wrapper(cmd_path: str) -> str:
-    """ジャンクションが使えない場合のフォールバック用 .cmd ラッパー"""
     short_p = _to_short_path(cmd_path)
     if not _has_cmd_special_chars(short_p):
         return short_p
@@ -952,10 +1240,6 @@ def _build_clean_cmd_wrapper(cmd_path: str) -> str:
 
 
 def fix_playwright_windows_driver():
-    """
-    Windowsでフォルダ名に括弧「( )」やスペースが含まれる場合（例: X_BOT_配布用(Python不要)）、
-    Playwrightドライバ起動時に cmd.exe がパスを途中で切断する問題を完全に回避する。
-    """
     if sys.platform != "win32":
         return
 
@@ -978,7 +1262,6 @@ def fix_playwright_windows_driver():
         raw_res = orig_compute()
         logger.info(f"🔍 Playwright検出ドライバ: {raw_res}")
 
-        # 実ドライバディレクトリを特定し、括弧等がある場合はクリーンなジャンクションを作成
         first_item = raw_res[0] if isinstance(raw_res, tuple) and raw_res else raw_res
         clean_driver_dir = None
         if isinstance(first_item, str) and _has_cmd_special_chars(first_item):
@@ -1007,8 +1290,7 @@ def fix_playwright_windows_driver():
         def _safe_compute_driver_executable():
             res = orig_compute()
             if isinstance(res, tuple):
-                fixed = tuple(_rewrite_path(x) for x in res)
-                return fixed
+                return tuple(_rewrite_path(x) for x in res)
             if isinstance(res, str):
                 return _rewrite_path(res)
             return res
@@ -1021,7 +1303,6 @@ def fix_playwright_windows_driver():
                     patched_count += 1
         logger.info(f"🔧 Playwrightドライバ補正完了 ({patched_count} モジュール適用)")
 
-        # 最終防衛ライン: asyncio.create_subprocess_exec でも括弧付き .cmd を回避
         if not getattr(asyncio.create_subprocess_exec, "_xbot_patched", False):
             orig_cse = asyncio.create_subprocess_exec
 
@@ -1041,132 +1322,253 @@ def fix_playwright_windows_driver():
         logger.warning(f"⚠️ Playwrightドライバパス補正エラー: {e}")
 
 
+def get_pid_file() -> str:
+    return os.path.join(get_app_dir(), "bot_running.pid")
+
+
+def get_stop_flag_file() -> str:
+    return os.path.join(get_app_dir(), "stop_bot.flag")
+
+
+def get_active_profile_file() -> str:
+    return os.path.join(get_app_dir(), "bot_active_profile.txt")
+
+
+def set_active_bot_profile(profile_name: str | None) -> None:
+    path = get_active_profile_file()
+    try:
+        if profile_name:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(sanitize_filename_part(profile_name))
+        else:
+            if os.path.exists(path):
+                os.remove(path)
+    except Exception:
+        pass
+
+
+def is_stop_requested() -> bool:
+    return os.path.exists(get_stop_flag_file())
+
+
+def interruptible_sleep(total_seconds: float) -> bool:
+    """停止フラグを0.5秒ごとに監視しながら待機する。停止要求があれば True を返す"""
+    end_at = time.time() + max(0.0, float(total_seconds))
+    while time.time() < end_at:
+        if is_stop_requested():
+            return True
+        time.sleep(min(0.5, max(0.05, end_at - time.time())))
+    return is_stop_requested()
+
+
 def safe_run():
     logger.info("==================================================")
-    logger.info("★ X 自動操縦ボット起動 (画像クールダウン＆日常ツイート完全統合版)")
+    logger.info("★ X 自動操縦ボット起動 (テーマ別シート管理＆投稿時間フィルタ対応版)")
+    logger.info("★ テーマ別管理: Excelの各シート(タブ)を独立テーマとして運用")
+    logger.info("★ 投稿時間フィルタ: 時間外ポストは即スキップして次の投稿へ進みます")
     logger.info("★ 案3: 画像クールダウン（同一垢30日 / 他垢7日共有ロック）")
-    logger.info("★ 日常ツイート: 朝枠・昼枠・夕方枠・夜枠のフォルダから画像自動選出")
     logger.info("★ 1窓交代ローテーション ＆ 画像・動画通信ブロック(メモリ60%カット)")
-    logger.info("★ 凍結対策: 凍結検知時にメモリから即座に永久排除 ＆ 再起動不要で完全自動継続！")
+    logger.info("★ 凍結対策: 凍結検知時にメモリから即座に永久排除 ＆ 再起動不要で継続！")
     logger.info(f"★ 登録済みブラックリスト除外アカウント数: {len(BLACKLISTED_ACCOUNTS)} 件")
     logger.info("==================================================")
 
-    next_post_times = {}
+    pid_path = get_pid_file()
+    stop_flag_path = get_stop_flag_file()
+    try:
+        if os.path.exists(stop_flag_path):
+            os.remove(stop_flag_path)
+        with open(pid_path, "w", encoding="utf-8") as pf:
+            pf.write(str(os.getpid()))
+    except Exception:
+        pass
+
+    next_post_times = {}  # key: (clean_id, sheet_name)
     fix_playwright_windows_driver()
 
-    with sync_playwright() as p:
-        while True:
-            accounts = load_accounts()
-            if not accounts:
-                logger.warning("運用可能な健全アカウントが見つかりません。30秒後に再確認します。")
-                time.sleep(30)
-                continue
-
-            now = datetime.now()
-            worked_in_this_cycle = False
-
-            for acc in accounts:
-                handle, clean_id = acc["handle"], acc["clean_id"]
-                if clean_id in BLACKLISTED_ACCOUNTS or not acc.get("excel_path"):
+    try:
+        with sync_playwright() as p:
+            while not is_stop_requested():
+                accounts = load_accounts()
+                if not accounts:
+                    logger.warning("運用可能な健全アカウントが見つかりません。30秒後に再確認します。")
+                    if interruptible_sleep(30):
+                        break
                     continue
 
-                settings = get_settings(acc["excel_path"])
-                excel_path = acc["excel_path"]
+                worked_in_this_cycle = False
 
-                # 1. まず日常ツイート枠があるかチェック
-                daily_item = get_eligible_daily_tweet(excel_path, handle)
-                is_daily, target_text, target_img = False, "", None
+                for acc in accounts:
+                    if is_stop_requested():
+                        break
 
-                if daily_item:
-                    is_daily = True
-                    target_text = daily_item["final_text"]
-                    target_img = daily_item.get("image")
-                    logger.info(f"✨ [{handle}] 日常ツイート枠「{daily_item['slot_name']}」を検知しました！")
-                else:
-                    if not is_within_operating_hours(settings):
+                    handle, clean_id = acc["handle"], acc["clean_id"]
+                    excel_path = acc.get("excel_path")
+                    if clean_id in BLACKLISTED_ACCOUNTS or not excel_path:
                         continue
-                    if handle in next_post_times and now < next_post_times[handle]:
+
+                    switch_account_log(clean_id)
+                    account_suspended = False
+                    try:
+                        now = datetime.now()
+                        themes = load_theme_sheets(excel_path, handle=handle, now_dt=now)
+
+                        for theme in themes:
+                            if is_stop_requested():
+                                break
+                            if clean_id in BLACKLISTED_ACCOUNTS:
+                                account_suspended = True
+                                break
+
+                            sheet_name = theme["sheet_name"]
+                            st = theme["settings"]
+                            layout = theme["layout"]
+
+                            if not st["enabled"]:
+                                continue
+                            if not is_today_allowed(st["weekdays"], now_dt=now):
+                                continue
+                            if not is_time_in_ranges(st["time_range"], now_dt=now):
+                                continue
+
+                            schedule_key = (clean_id, sheet_name)
+                            if schedule_key in next_post_times and datetime.now() < next_post_times[schedule_key]:
+                                continue
+
+                            eligible = theme["eligible_tweets"]
+                            # このテーマの全ポストが投稿済みの場合のみステータスをリセット（投稿時間待ちがある間はリセットしない）
+                            if theme["unposted_count"] == 0 and theme["total_count"] > 0:
+                                reset_all_tweets_status(
+                                    excel_path, sheet_name,
+                                    layout["header_row"], layout["text_col"], layout["status_col"], layout["date_col"]
+                                )
+                                reloaded = load_theme_sheets(excel_path, handle=handle, now_dt=datetime.now())
+                                matched = next((t for t in reloaded if t["sheet_name"] == sheet_name), None)
+                                eligible = matched["eligible_tweets"] if matched else []
+                            elif not eligible and theme["skipped_by_time_count"] > 0:
+                                logger.info(
+                                    f"⏭️ [{handle}] テーマ「{sheet_name}」: 未投稿 {theme['skipped_by_time_count']} 件は指定投稿時間外のため即スキップします。"
+                                )
+                                continue
+
+                            if not eligible:
+                                continue
+
+                            if is_stop_requested():
+                                break
+
+                            target_tweet = random.choice(eligible) if st["mode"] == 1 else eligible[0]
+                            target_text = replace_dynamic_tags(expand_spintax(target_tweet["raw_text"]))
+                            target_img = resolve_image_path(target_tweet["raw_img"], handle=handle)
+
+                            img_label = f" (画像: {os.path.basename(target_img)})" if target_img else " (画像なし)"
+                            pt_label = f" [指定時間: {target_tweet['post_time']}]" if target_tweet["post_time"] else " [指定時間: なし]"
+                            logger.info("\n--------------------------------------------------")
+                            logger.info(f"🔄 [{handle}] テーマ「{sheet_name}」行{target_tweet['row']}{pt_label}{img_label}")
+                            logger.info(f"📝 {target_text[:40]}...")
+                            logger.info("--------------------------------------------------")
+
+                            session_dir = resolve_session_dir(handle)
+                            logger.info(f"📂 プロファイル参照先: {session_dir}")
+
+                            context, page, is_suspended, suspension_reason = None, None, False, ""
+                            set_active_bot_profile(clean_id)
+                            try:
+                                context = launch_browser_safely(p, session_dir)
+                                page = context.pages[0] if len(context.pages) > 0 else context.new_page()
+                                apply_media_blocking(page)
+
+                                if acc.get("auth_token"):
+                                    context.add_cookies([{"name": "auth_token", "value": acc["auth_token"], "domain": ".x.com", "path": "/"}])
+
+                                if is_stop_requested():
+                                    break
+
+                                page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=30000)
+                                if interruptible_sleep(random.uniform(2.0, 3.0)):
+                                    break
+
+                                susp_check = check_suspension_or_lock(page)
+                                if susp_check:
+                                    is_suspended, suspension_reason = True, susp_check
+                                    save_account_screenshot(page, clean_id, "suspended")
+                                else:
+                                    res = post_tweet_with_smart_retry(page, target_text, target_img, account_name=clean_id)
+                                    if res == "aborted" or is_stop_requested():
+                                        logger.info(f"🛑 [{handle}] 停止指示により投稿処理を中断しました（Excelステータスは未投稿のまま維持）。")
+                                        break
+                                    elif res.startswith("suspended:"):
+                                        is_suspended, suspension_reason = True, res.replace("suspended:", "")
+                                    elif res == "success":
+                                        if target_img:
+                                            record_image_usage(target_img, handle)
+                                        update_excel_status(
+                                            excel_path, sheet_name,
+                                            target_tweet["row"], target_tweet["status_col"], target_tweet["date_col"],
+                                            "posted"
+                                        )
+                                    else:
+                                        update_excel_status(
+                                            excel_path, sheet_name,
+                                            target_tweet["row"], target_tweet["status_col"], target_tweet["date_col"],
+                                            "skipped"
+                                        )
+                            except Exception as loop_e:
+                                logger.error(f"[{handle}] ({sheet_name}) エラー: {loop_e}")
+                                save_account_screenshot(page, clean_id, "loop_error")
+                            finally:
+                                if context:
+                                    try:
+                                        context.close()
+                                        logger.info(f"🧹 [{handle}] の自動投稿用ブラウザを安全に終了しました。")
+                                    except Exception:
+                                        pass
+                                set_active_bot_profile(None)
+
+                            if is_suspended:
+                                logger.critical(f"🚨 [{handle}] の凍結検知（原因: {suspension_reason}）")
+                                blacklist_and_remove_account(handle, reason=suspension_reason)
+                                for k in [key for key in next_post_times if key[0] == clean_id]:
+                                    del next_post_times[k]
+                                logger.info("⚡ 再起動せず即時排除しました。残りのアカウントで継続します。")
+                                if interruptible_sleep(2):
+                                    break
+                                account_suspended = True
+                                break
+
+                            t_min = min(st["min_interval"], st["max_interval"])
+                            t_max = max(st["min_interval"], st["max_interval"])
+                            wait_sec = random.randint(t_min, t_max) if t_min < t_max else t_min
+                            next_post_times[schedule_key] = datetime.now() + timedelta(seconds=wait_sec)
+
+                            logger.info(
+                                f"⏳ [{handle} / {sheet_name}] 次回: {next_post_times[schedule_key].strftime('%H:%M:%S')} "
+                                f"({wait_sec // 60}分 {wait_sec % 60}秒 後)"
+                            )
+                            worked_in_this_cycle = True
+                            if interruptible_sleep(random.uniform(5.0, 10.0)):
+                                break
+                    finally:
+                        switch_account_log(None)
+
+                    if account_suspended:
+                        worked_in_this_cycle = True
                         continue
-                    tweets = load_tweets(excel_path, handle=handle)
-                    if not tweets:
-                        reset_all_tweets_status(excel_path)
-                        tweets = load_tweets(excel_path, handle=handle)
-                    if not tweets:
-                        continue
-                    target_tweet = random.choice(tweets) if settings["mode"] == 1 else tweets[0]
-                    target_text, target_img = target_tweet["text"], target_tweet["image"]
 
-                mode_label = "【日常ツイート】" if is_daily else "【通常ツイート】"
-                img_label = f" (画像: {os.path.basename(target_img)})" if target_img else " (画像なし)"
-                logger.info("\n--------------------------------------------------")
-                logger.info(f"🔄 [{handle}] {mode_label}{img_label}")
-                logger.info(f"📝 {target_text[:35]}...")
-                logger.info("--------------------------------------------------")
-
-                session_dir = resolve_session_dir(handle)
-                logger.info(f"📂 プロファイル参照先: {session_dir}")
-
-                context, is_suspended, suspension_reason = None, False, ""
-                try:
-                    context = launch_browser_safely(p, session_dir)
-                    page = context.pages[0] if len(context.pages) > 0 else context.new_page()
-                    apply_media_blocking(page)
-
-                    if acc.get("auth_token"):
-                        context.add_cookies([{"name": "auth_token", "value": acc["auth_token"], "domain": ".x.com", "path": "/"}])
-
-                    page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=30000)
-                    time.sleep(random.uniform(2.0, 3.0))
-
-                    susp_check = check_suspension_or_lock(page)
-                    if susp_check:
-                        is_suspended, suspension_reason = True, susp_check
-                    else:
-                        res = post_tweet_with_smart_retry(page, target_text, target_img)
-                        if res.startswith("suspended:"):
-                            is_suspended, suspension_reason = True, res.replace("suspended:", "")
-                        elif res == "success":
-                            # 投稿成功時に画像履歴を永続記録（案3 クールダウン30日・他垢7日）
-                            if target_img:
-                                record_image_usage(target_img, handle)
-
-                            if is_daily:
-                                update_daily_tweet_status(excel_path, daily_item["row"])
-                            else:
-                                update_excel_status(excel_path, target_tweet["row"], target_tweet["status_col"], target_tweet["date_col"], "posted")
-                        else:
-                            if not is_daily:
-                                update_excel_status(excel_path, target_tweet["row"], target_tweet["status_col"], target_tweet["date_col"], "skipped")
-                except Exception as loop_e:
-                    logger.error(f"[{handle}] エラー: {loop_e}")
-                finally:
-                    if context:
-                        try:
-                            context.close()
-                            logger.info(f"🧹 [{handle}] のブラウザを閉じ、メモリを全解放しました。")
-                        except Exception:
-                            pass
-
-                if is_suspended:
-                    logger.critical(f"🚨 [{handle}] の凍結検知（原因: {suspension_reason}）")
-                    blacklist_and_remove_account(handle, reason=suspension_reason)
-                    if handle in next_post_times:
-                        del next_post_times[handle]
-                    logger.info("⚡ 再起動せず即時排除しました。残りのアカウントで継続します。")
-                    time.sleep(2)
+                if is_stop_requested():
                     break
+                if not worked_in_this_cycle:
+                    if interruptible_sleep(15):
+                        break
 
-                t_min = min(settings["min_interval"], settings["max_interval"])
-                t_max = max(settings["min_interval"], settings["max_interval"])
-                wait_sec = random.randint(t_min, t_max) if t_min < t_max else t_min
-                next_post_times[handle] = datetime.now() + timedelta(seconds=wait_sec)
-
-                logger.info(f"⏳ [{handle}] 次回: {next_post_times[handle].strftime('%H:%M:%S')} ({wait_sec // 60}分 {wait_sec % 60}秒 後)")
-                worked_in_this_cycle = True
-                time.sleep(random.uniform(5.0, 10.0))
-
-            if not worked_in_this_cycle:
-                time.sleep(15)
+        if is_stop_requested():
+            logger.info("🛑 停止指示を検知したため、ボットを安全に停止しました。")
+    finally:
+        for fp in (pid_path, stop_flag_path, get_active_profile_file()):
+            try:
+                if os.path.exists(fp):
+                    os.remove(fp)
+            except Exception:
+                pass
 
 
 def main():
@@ -1180,6 +1582,8 @@ def main():
         print("キーを押すと画面を閉じます...")
         print("=" * 60)
         input()
+    finally:
+        close_account_log()
 
 
 if __name__ == "__main__":
